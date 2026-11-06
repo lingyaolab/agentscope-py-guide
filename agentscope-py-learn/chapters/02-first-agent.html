@@ -104,7 +104,7 @@ async def main() -&gt; None:
             credential=DeepSeekCredential(
                 api_key=os.environ["DEEPSEEK_API_KEY"],
             ),
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
         ),
         toolkit=Toolkit(tools=[FunctionTool(get_weather, is_read_only=True)]),
     )
@@ -519,7 +519,7 @@ REPLY_END</code></pre>
           <span class="ct">模型不调用工具，而是自己编答案</span>
           <p>
             先检查三处：函数有没有类型注解、docstring 是不是 <code>Args:</code> 格式、<code>description</code>
-            有没有说清「什么时候该用它」。再确认模型本身支持工具调用（<code>deepseek-chat</code> 支持）。
+            有没有说清「什么时候该用它」。再确认模型本身支持工具调用（<code>deepseek-v4-flash</code> 支持）。
             最后在 <code>system_prompt</code> 里明确要求「需要天气时调用 get_weather」。
           </p>
         </div>
@@ -575,10 +575,8 @@ REPLY_END</code></pre>
         <h2 id="next">下一步</h2>
         <p>
           你已经看到事件流是 Agent 的「对外语言」。下一章
-          <strong>03 消息与事件</strong> 会把 <code>Msg</code> 的内容块、事件类型、流式增量与前后端契约讲透；
-          03 章尚未发布前，可以先读
-          <a href="01-setup.html">01 环境与依赖</a> 的版本与依赖部分，或回
-          <a href="00-study-map.html">00 学习地图</a> 看后续依赖。
+          <a href="03-message-event.html">03 消息与事件</a> 会把 <code>Msg</code> 的内容块、事件类型、流式增量与前后端契约讲透。
+          如果还没装环境，回 <a href="01-setup.html">01 环境与依赖</a> 补齐。
         </p>
       </article>
     </main>

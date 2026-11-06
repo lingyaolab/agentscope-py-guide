@@ -124,7 +124,7 @@ async def main() -&gt; None:
             credential=DeepSeekCredential(
                 api_key=os.environ["DEEPSEEK_API_KEY"],
             ),
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
         ),
         toolkit=Toolkit(),
     )
@@ -383,7 +383,7 @@ model = DeepSeekChatModel(
     credential=DeepSeekCredential(
         api_key=os.environ["DEEPSEEK_API_KEY"],
     ),
-    model="deepseek-chat",
+    model="deepseek-v4-flash",
 )</code></pre>
         <p>
           <code>DeepSeekCredential</code> 默认的 base URL 是 <code>https://api.deepseek.com</code>
@@ -440,7 +440,7 @@ model = OllamaChatModel(
               </tr>
               <tr>
                 <td>模型名</td>
-                <td><code>deepseek-chat</code>（对话）/ <code>deepseek-reasoner</code>（推理）</td>
+                <td><code>deepseek-v4-flash</code>（默认）/ <code>deepseek-v4-pro</code>（更强）</td>
               </tr>
               <tr>
                 <td>循环上限</td>
@@ -501,9 +501,9 @@ model = OllamaChatModel(
 
         <h2 id="next">下一步</h2>
         <p>
-          环境通了，下一章进入 <strong>02 第一个 Agent</strong>：把这次「直接回答」扩展成真正会调用工具的循环，
-          并讲清 ReAct 的终止条件与状态从哪来。02 章尚未发布前，可以先读
-          <a href="00-study-map.html">00 学习地图</a> 里的依赖图，了解后面章节的顺序。
+          环境通了，下一章进入 <a href="02-first-agent.html">02 第一个 Agent</a>：把这次「直接回答」扩展成真正会调用工具的循环，
+          并讲清 ReAct 的终止条件与状态从哪来。想先看全局顺序，可以回
+          <a href="00-study-map.html">00 学习地图</a> 的依赖图。
         </p>
       </article>
     </main>

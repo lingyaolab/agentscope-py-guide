@@ -2,6 +2,21 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.4.0 — 2026-11-06
+
+新增第 04 章「模型接入」，并把 01、02 章的示例模型名修正到当前活跃版本。
+
+- **凭证**：`CredentialBase`、各家 `type` 判别值、`SecretStr`、`get_chat_model_class()` 的绑定关系。
+- **工厂**：`CredentialFactory.from_dict` / `register_credential` / `list_schemas`。
+- **模型**：`ChatModelBase.__call__` 的两种返回、重试预算、取消返回 `interrupted`、流式最终聚合块。
+- **参数**：`stream=True`、`max_retries=3`（总尝试 4 次）、固定 `retry_delay`、`context_size` 的真实含义。
+- **响应**：`ChatResponse`、`ChatUsage`，以及模型层 `FinishedReason` 与回复层 `ReplyFinishedReason` 的区别。
+- **重试**：DeepSeek 的四类可重试异常，401 / 400 直接抛。
+- **模型卡片**：`ModelCard` 字段、`_models/*.yaml` 扫描、`list_models()` 用法。
+- **修正**：`deepseek-chat` / `deepseek-reasoner` 在 2.0.11 已标记 `sunset`（2026-07-24），
+  01、02 章示例统一改为 `deepseek-v4-flash`，01 章速查表同步更新。
+- **串联**：01→02→03→04 的「下一步」互链补齐，不再出现「尚未发布」的旧提示。
+
 ## v0.3.0 — 2026-11-06
 
 新增第 03 章「消息与事件」，把 02 章的事件流拆到可自己实现前端/持久化的程度。
