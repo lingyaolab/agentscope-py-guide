@@ -11,7 +11,7 @@
  *   4. 站内链接（含锚点）都能落地；同一页 id 不重复
  *   5. 每页有 description、og:title，title 全局唯一
  *   6. 首页 data-cards 的分组名与 nav 的 groups 一致
- *   7. 发布入口与元文件齐全（根跳转页 / 404 / robots / .nojekyll / favicon / Pages 工作流）
+ *   7. 发布入口与元文件齐全（根跳转页 / 404 / robots / .nojekyll / favicon）
  *   8. 搜索索引包含全部 ready 页面（内容改动后忘记重建会在这里失败）
  *   9. 正文里的 <span class="src"> 都有 data-src（图例除外）
  *
@@ -209,7 +209,6 @@ const required = [
   [".nojekyll", path.join(SITE, ".nojekyll")],
   ["assets/favicon.svg", path.join(ASSETS, "favicon.svg")],
   ["仓库根跳转页 index.html", path.join(ROOT, "index.html")],
-  ["Pages 工作流", path.join(ROOT, ".github/workflows/deploy-pages.yml")],
 ];
 const missingFiles = required.filter(([, p]) => !fs.existsSync(p)).map(([n]) => n);
 check("发布入口与元文件齐全", missingFiles.length === 0, missingFiles.join(", "));

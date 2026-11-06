@@ -2,6 +2,16 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.2.1 — 2026-11-06
+
+去掉 GitHub Actions 部署工作流，改为纯本地校验 + 可选的分支部署。
+
+- **删除**：`.github/workflows/deploy-pages.yml`。原因是 Pages 未启用，每次 push 都会让工作流失败；
+  静态站本身零构建，没必要为此维护 CI。
+- **同步**：`tools/check-site.cjs` 不再要求工作流文件存在；`DEPLOY.md` 的 Pages 章节改为
+  「Settings → Pages → Deploy from a branch」的分支部署说明。
+- **保留**：`build-search-index`、`check-site`、`check-sources` 三个脚本仍作为提交前的本地自检。
+
 ## v0.2.0 — 2026-11-06
 
 新增第 02 章「第一个 Agent」，把 01 章的「一次模型调用」推进到完整的 ReAct 循环。

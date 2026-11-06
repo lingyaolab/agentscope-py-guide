@@ -30,19 +30,15 @@ python -m http.server 8080
 # 打开 http://localhost:8080/agentscope-py-learn/
 ```
 
-## 3. GitHub Pages（推荐，仓库已带工作流）
+## 3. GitHub Pages（可选，不用工作流）
 
-工作流：`.github/workflows/deploy-pages.yml`
+仓库没有 CI 工作流，Pages 用「分支部署」即可，零构建：
 
-1. 仓库 **Settings → Pages → Build and deployment → Source** 选择 **GitHub Actions**
-2. push 到 `main`（或在 Actions 里手动 `Run workflow`）
-3. 工作流依次执行：
-   - `node tools/build-search-index.cjs` 重建搜索索引
-   - `node tools/check-site.cjs --quiet` 静态检查（任何一项失败会阻止发布）
-   - 上传 `agentscope-py-learn/` 作为 Pages artifact
-   - 部署到 `https://<user>.github.io/<repo>/`
+1. 仓库 **Settings → Pages → Build and deployment → Source** 选择 **Deploy from a branch**
+2. Branch 选 `main`，目录选 `/ (root)`
+3. 保存后访问 `https://<user>.github.io/<repo>/`，根目录的 `index.html` 会跳到 `agentscope-py-learn/`
 
-站点内部全部使用相对链接，部署在子路径下不需要改任何配置。
+站点内部全部使用相对链接，部署在子路径下不需要改任何配置。如果以后想改用 Actions 部署，再把工作流加回来即可。
 
 ## 4. Vercel / Netlify / Cloudflare Pages
 
@@ -107,7 +103,7 @@ node tools/check-sources.cjs        # 每条出处是否都能在 2.0.11 源码�
 2. `node tools/build-search-index.cjs`
 3. `node tools/check-site.cjs`、`node tools/check-sources.cjs`
 4. 在 `CHANGELOG.md` 记一笔（站点内首页「更新记录」同步）
-5. 提交并 push，GitHub Pages 自动发布
+5. 提交并 push；如果启用了 Pages 分支部署，会自动更新
 
 ## 9. 版本号约定
 
