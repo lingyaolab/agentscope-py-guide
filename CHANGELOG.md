@@ -2,6 +2,19 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.13.0 — 2026-11-07
+
+新增第 13 章「中断、恢复与状态」，把长任务的暂停与续跑讲完整。
+
+- **状态**：`AgentState` 八组字段，以及只存 `context` 会丢什么。
+- **序列化**：`model_dump_json()` / `AgentState.model_validate_json()`，`Agent(state=...)` 恢复。
+- **中断**：运行中 `task.cancel()` 与挂起中 `UserInterruptEvent` 的区别。
+- **清理**：`_close_unfinished_tool_calls` 如何给每个未完成调用补 `INTERRUPTED` 结果。
+- **恢复**：`reply(None)`、三类事件、`reply_id` 对齐。
+- **一致性**：什么时候保存、哪些东西不在 `AgentState` 里。
+- **存储**：`RedisStorage` / `AsyncSQLAlchemyStorage`、`SessionRecord.state`、`update_session_state` 的 `KeyError`。
+- **隔离**：`(user_id, agent_id, session_id)` 三元组。
+
 ## v0.12.0 — 2026-11-06
 
 新增第 12 章「工作区与沙箱」，让 Agent 真正读写文件、执行命令。
