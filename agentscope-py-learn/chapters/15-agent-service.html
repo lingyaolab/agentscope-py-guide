@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 Agent Service：create_app、Storage/MessageBus/WorkspaceManager、资源模型、POST /chat 与 SSE、会话中断、多租户鉴权、两层中间件与部署。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="15 Agent Service：把 Agent 部署成多租户 HTTP 服务 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="create_app、Storage/MessageBus/WorkspaceManager、资源模型、POST /chat 与 SSE、会话中断、多租户鉴权、两层中间件与部署。" />
+    <title>15 Agent Service：把 Agent 部署成多租户 HTTP 服务 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="15-agent-service" data-root="..">
+    <main>
+      <article class="article">
+        <h1>15 · Agent Service</h1>
+        <p class="lede">
+          前 14 章都在「写一个 Agent」。这一章把它变成<strong>服务</strong>：多用户、多会话、可持久化、
+          能流式推事件、能从外部中断。核心入口只有一个 <code>create_app</code>，
+          但它要求你先想清楚三件事：状态存哪、事件怎么传、工作区归谁。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>用 <code>create_app</code> 加上三个必需组件启一个服务</li>
+          <li>说清 Agent、Session、Credential、Workspace 的关系</li>
+          <li>走通「建 Agent → 建凭证 → 建会话 → POST /chat → 订阅 SSE」</li>
+          <li>知道默认的 <code>X-User-ID</code> 不是鉴权，生产必须替换</li>
+        </ul>
+
+        <h2 id="why">先说为什么：单机脚本到服务的鸿沟</h2>
+        <p>
+          SDK 是一个库：你构造 Agent、调用 <code>reply_stream</code>、自己处理事件。
+          一旦要给多个用户用，立刻多出一堆「外围职责」：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>职责</th>
+                <th>SDK 里</th>
+                <th>服务里</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>请求路由</td>
+                <td>你自己写</td>
+                <td>FastAPI routers</td>
+              </tr>
+              <tr>
+                <td>用户隔离</td>
+                <td>你自己传</td>
+                <td>每个请求解析 <code>user_id</code>，所有权在路由层强制</td>
+              </tr>
+              <tr>
+                <td>会话状态</td>
+                <td>内存 / 自己存</td>
+                <td>Storage + <code>SessionRecord</code></td>
+              </tr>
+              <tr>
+                <td>事件推送</td>
+                <td>自己消费生成器</td>
+                <td>MessageBus + SSE，多订阅者、可重放</td>
+              </tr>
+              <tr>
+                <td>工作区</td>
+                <td>自己建</td>
+                <td>WorkspaceManager 按策略分配与回收</td>
+              </tr>
+              <tr>
+                <td>后台任务 / 定时任务</td>
+                <td>自己写</td>
+                <td>内置 ToolOffload 与 Scheduler</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          服务的价值就是把这些「外围」接管掉，让基于 <code>Agent</code> 的代码不用重写就能承接生产流量。
+        </p>
+
+        <h2 id="architecture">架构：六个部件</h2>
+        <pre><code>Client / Frontend
+      │  HTTP + SSE
+      ▼
+┌─────────────────────────────────────────────┐
+│ FastAPI App                                 │
+│  ASGI 中间件（协议 / CORS / 鉴权 / OTel）    │
+│  Routers（/chat /sessions /agent ...）       │
+│                                             │
+│  Lifespan 资源                              │
+│   Storage ── MessageBus ── WorkspaceManager  │
+│   ChatService ── SessionService              │
+│   WakeupDispatcher / Scheduler / Tasks       │
+└─────────────────────────────────────────────┘
+      │
+      ▼
+   Agent 实例（每轮 chat 组装一次）</code></pre>
+        <p>
+          六个核心部件：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>部件</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>Storage</code></td><td>Agent、Session、Credential、Message、Schedule 等记录</td></tr>
+              <tr><td><code>MessageBus</code></td><td>会话锁、回放日志、收件箱、唤醒信号</td></tr>
+              <tr><td><code>WorkspaceManager</code></td><td>工作区生命周期与隔离策略</td></tr>
+              <tr><td><code>ChatService</code></td><td>运行 / 中断会话的唯一入口</td></tr>
+              <tr><td><code>SessionService</code></td><td>会话 CRUD、状态探测、中断派发</td></tr>
+              <tr><td>Agent 层中间件</td><td>Inbox、ToolOffload、StateChange 等</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="create_app">create_app：装配</h2>
+        <p>
+          <code>create_app</code>
+          <span class="src" data-src="src/agentscope/app/_app.py:113">_app.py:113</span>
+          只有三个必填参数：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>参数</th>
+                <th>类型</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>storage</code><span class="src" data-src="src/agentscope/app/_app.py:114">_app.py:114</span></td>
+                <td><code>StorageBase</code></td>
+                <td>持久化记录</td>
+              </tr>
+              <tr>
+                <td><code>message_bus</code><span class="src" data-src="src/agentscope/app/_app.py:115">_app.py:115</span></td>
+                <td><code>MessageBus</code></td>
+                <td>运行时事件与唤醒</td>
+              </tr>
+              <tr>
+                <td><code>workspace_manager</code><span class="src" data-src="src/agentscope/app/_app.py:116">_app.py:116</span></td>
+                <td><code>WorkspaceManagerBase</code></td>
+                <td>工作区分配与回收</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>其余都是可选的，常用的有：</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>参数</th>
+                <th>用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>knowledge_base_manager</code><span class="src" data-src="src/agentscope/app/_app.py:117">_app.py:117</span></td><td>启用 RAG 端点；不传则关闭</td></tr>
+              <tr><td><code>extra_middlewares</code><span class="src" data-src="src/agentscope/app/_app.py:128">_app.py:128</span></td><td>ASGI 中间件：协议、CORS、鉴权、OTel</td></tr>
+              <tr><td><code>extra_agent_middlewares</code><span class="src" data-src="src/agentscope/app/_app.py:129">_app.py:129</span></td><td>每轮组装 Agent 时追加的中间件工厂</td></tr>
+              <tr><td><code>extra_agent_tools</code><span class="src" data-src="src/agentscope/app/_app.py:130">_app.py:130</span></td><td>按用户 / 会话动态加工具</td></tr>
+              <tr><td><code>custom_agent_cls</code><span class="src" data-src="src/agentscope/app/_app.py:132">_app.py:132</span></td><td>替换每轮实例化的 Agent 子类</td></tr>
+              <tr><td><code>channels</code><span class="src" data-src="src/agentscope/app/_app.py:134">_app.py:134</span></td><td>飞书 / 钉钉 / Discord 等渠道适配器</td></tr>
+              <tr><td><code>download_secret</code><span class="src" data-src="src/agentscope/app/_app.py:135">_app.py:135</span></td><td>工作区文件下载令牌签名；多副本必须共享</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <pre><code>import uvicorn
+
+from agentscope.app import create_app
+from agentscope.app.message_bus import RedisMessageBus
+from agentscope.app.storage import RedisStorage
+from agentscope.app.workspace_manager import LocalWorkspaceManager
+
+storage = RedisStorage(host="localhost", port=6379)
+message_bus = RedisMessageBus(host="localhost", port=6379)
+workspace_manager = LocalWorkspaceManager(
+    basedir="/data/workspaces",
+    ttl=3600.0,
+)
+
+app = create_app(
+    storage=storage,
+    message_bus=message_bus,
+    workspace_manager=workspace_manager,
+)
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)</code></pre>
+        <p>
+          三个组件的连接池都在应用 <strong>lifespan</strong> 里打开，关闭时释放。
+          启动顺序大致是 storage → message bus → workspace manager → 其他 manager → 服务；
+          任何一步失败，已进入的资源也会被清理。
+        </p>
+
+        <h2 id="resources">资源模型：Agent 是模板，Session 是状态</h2>
+        <p>
+          这是最容易搞混的一点：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>资源</th>
+                <th>是什么</th>
+                <th>生命周期</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>User</td>
+                <td>请求解析出的租户标识</td>
+                <td>外部系统负责</td>
+              </tr>
+              <tr>
+                <td>Credential</td>
+                <td>某 provider 的 key 与连接配置</td>
+                <td>可跨 Agent / Session 复用</td>
+              </tr>
+              <tr>
+                <td>Agent</td>
+                <td>展示名、system prompt、<code>chat_config</code></td>
+                <td><strong>可复用模板</strong>，不含运行时状态</td>
+              </tr>
+              <tr>
+                <td>Session</td>
+                <td>一次正在进行的会话</td>
+                <td><strong>承载 <code>AgentState</code></strong>、消息、模型配置</td>
+              </tr>
+              <tr>
+                <td>Workspace</td>
+                <td>运行时环境（文件、MCP、技能）</td>
+                <td>按 manager 策略分配，TTL 回收</td>
+              </tr>
+              <tr>
+                <td>Schedule</td>
+                <td>cron 触发的 Agent 执行</td>
+                <td>持久化，跨重启</td>
+              </tr>
+              <tr>
+                <td>MessageBus</td>
+                <td>会话锁、回放、收件箱、唤醒</td>
+                <td>进程级 / Redis</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          记住一句话：<strong>Agent 是可复用的模板，Session 才是运行时状态</strong>。
+          同一个 Agent 可以在不同模型下驱动多个会话，互不干扰。
+        </p>
+
+        <h2 id="flow">一次聊天：五步与端点</h2>
+        <ol>
+          <li><code>POST /agent</code>：注册 Agent 身份（展示名、system prompt、配置）</li>
+          <li><code>GET /credential/schemas</code> → <code>POST /credential</code>：发现并保存 provider key</li>
+          <li><code>POST /sessions</code>：创建会话，绑定模型与凭证</li>
+          <li>可选：<code>POST /workspace/mcp</code>、<code>POST /workspace/skill</code></li>
+          <li><code>POST /chat</code>：触发一次运行；事件走 <code>GET /sessions/{id}/stream</code></li>
+        </ol>
+        <p>
+          <code>POST /chat</code>
+          <span class="src" data-src="src/agentscope/app/_router/_chat.py:54">_chat.py:54</span>
+          是<strong>触发即返回</strong>的：立刻给你 <code>{"status": "started"}</code>，
+          事件通过按会话的 SSE 流异步投递。
+        </p>
+        <pre><code>POST /chat
+X-User-ID: alice
+{
+  "agent_id": "agent-xxx",
+  "session_id": "session-xxx",
+  "input": {
+    "name": "alice",
+    "role": "user",
+    "content": [{"type": "text", "text": "Hello"}]
+  }
+}
+
+GET /sessions/session-xxx/stream?agent_id=agent-xxx
+Accept: text/event-stream</code></pre>
+        <p>
+          输入不止 <code>Msg</code>：也可以是 <code>UserConfirmResultEvent</code> /
+          <code>ExternalExecutionResultEvent</code>（HITL 续接）或 <code>None</code>（继续当前状态）。
+          这和服务内 <code>reply_stream</code> 的输入类型一致。
+        </p>
+        <p>
+          其他常用端点：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>端点</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>GET /sessions/{id}/messages</code></td><td>分页拉取消息</td></tr>
+              <tr><td><code>POST /sessions/{id}/interrupt</code></td><td>中断运行中或 HITL 暂停的回复</td></tr>
+              <tr><td><code>GET /sessions/{id}/status</code></td><td>running / parked / idle / gone</td></tr>
+              <tr><td><code>GET /agent/schema/v2</code></td><td>前端渲染 Agent 表单的 JSON Schema</td></tr>
+              <tr><td><code>GET /model?provider=...</code></td><td>某 provider 的模型卡片</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="session">会话：状态、SSE 与中断</h2>
+        <h3>同一会话同时只能跑一次</h3>
+        <p>
+          服务用 <code>ChatRunRegistry</code> 强制这条规则。重复 <code>POST /chat</code> 会返回
+          HTTP 409。要靠多轮触发并行，应该建多个会话，而不是并发打同一个。
+        </p>
+        <h3>SSE 支持重放与扇出</h3>
+        <p>
+          <code>GET /sessions/{id}/stream</code>
+          <span class="src" data-src="src/agentscope/app/_router/_session.py:815">_session.py:815</span>
+          连接保持打开。后接入的客户端会先收到缓冲历史，再接收实时事件；
+          多个标签页或断线重连都能保持同步。帧格式与 03 章一致：<code>data: &lt;json&gt;\n\n</code>。
+        </p>
+        <h3>中断</h3>
+        <p>
+          <code>POST /sessions/{id}/interrupt</code>
+          <span class="src" data-src="src/agentscope/app/_router/_session.py:426">_session.py:426</span>
+          是 <code>ChatService.interrupt()</code>
+          <span class="src" data-src="src/agentscope/app/_service/_chat.py:679">_chat.py:679</span>
+          的薄封装：它可以取消正在跑的回复，也可以结束 HITL 暂停的回复。
+          清理逻辑就是 13 章的「关闭未完成工具调用」。
+        </p>
+        <h3>会话来源</h3>
+        <p>
+          <code>SessionRecord.origin</code> 是带 tag 的联合类型：
+          <code>user</code>、<code>schedule</code>、<code>channel</code>、<code>team</code>。
+          判断来源用 <code>isinstance(record.origin, ChannelOrigin)</code>，不用再检查 id 是否自洽。
+        </p>
+
+        <h2 id="multitenant">多租户与鉴权</h2>
+        <p>
+          每个请求都解析出一个 <code>user_id</code>，凭证、Agent、会话、调度、消息都归它所有。
+          路由层强制所有权，所以一份部署可以服务多用户。
+        </p>
+        <div class="callout warn">
+          <span class="ct">默认的 <code>X-User-ID</code> 不是鉴权</span>
+          <p>
+            <code>get_current_user_id</code>
+            <span class="src" data-src="src/agentscope/app/deps.py:35">deps.py:35</span>
+            只是从 header 读一个字符串。任何人都能伪造。生产环境必须替换为 JWT / OAuth / session token。
+          </p>
+        </div>
+        <pre><code>from agentscope.app.deps import get_current_user_id as default_dependency
+
+app.dependency_overrides[default_dependency] = my_jwt_user_id</code></pre>
+        <p>
+          默认的资源访问策略是 <code>DenyAllResourceAccessPolicy</code>：用户之间不共享凭证、Agent、知识库。
+          要跨用户共享，传入自定义 <code>resource_access_policy</code>（20 章）。
+        </p>
+
+        <h2 id="storage-bus">存储与消息总线</h2>
+        <h3>Storage</h3>
+        <p>
+          <code>StorageBase</code>
+          <span class="src" data-src="src/agentscope/app/storage/_base.py:32">_base.py:32</span>
+          定义记录契约。内置：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>实现</th>
+                <th>适合</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>RedisStorage</code><span class="src" data-src="src/agentscope/app/storage/_redis_storage.py:56">_redis_storage.py:56</span></td><td>默认，低延迟</td></tr>
+              <tr><td><code>AsyncSQLAlchemyStorage</code></td><td>事务、查询、长期归档</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          记录类型包括 <code>AgentRecord</code>、<code>SessionRecord</code>、<code>CredentialRecord</code>、
+          <code>ScheduleRecord</code>、<code>TeamRecord</code>、知识库记录与会话消息。
+        </p>
+        <h3>MessageBus</h3>
+        <p>
+          <code>MessageBus</code>
+          <span class="src" data-src="src/agentscope/app/message_bus/__init__.py:4">__init__.py:4</span>
+          是运行时层，负责会话锁、回放日志、收件箱与唤醒信号。两个实现：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>实现</th>
+                <th>适合</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>RedisMessageBus</code><span class="src" data-src="src/agentscope/app/message_bus/__init__.py:7">__init__.py:7</span></td><td>多进程 / 多节点</td></tr>
+              <tr><td><code>InMemoryMessageBus</code></td><td>单进程测试</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          它把「触发 chat」和「投递事件」解耦：调度、队友消息、后台工具完成，都是通过
+          inbox + wakeup 叫醒空闲会话，而不是直接调用 <code>ChatService</code>。
+        </p>
+        <div class="callout tip">
+          <span class="ct">分布式部署靠共享 Redis</span>
+          <p>
+            存储与消息总线都指向同一个 Redis，多个 worker 进程就能服务同一个逻辑服务。
+            会话锁在总线里，所以同一会话不会被两个进程同时跑。
+          </p>
+        </div>
+
+        <h2 id="middleware">两层中间件</h2>
+        <p>
+          服务里有两个完全不同的中间件层，别混：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>层</th>
+                <th>包住什么</th>
+                <th>典型用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>ASGI 中间件</td>
+                <td>每次 HTTP 请求</td>
+                <td>协议适配、CORS、鉴权、OpenTelemetry</td>
+              </tr>
+              <tr>
+                <td>Agent 层中间件</td>
+                <td><code>ChatService</code> 内每次 Agent 调用</td>
+                <td>收件箱、工具卸载、状态变更通知</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>框架始终安装三个 Agent 层中间件：</p>
+        <ul>
+          <li>
+            <code>InboxMiddleware</code>
+            <span class="src" data-src="src/agentscope/app/middleware/__init__.py:4">__init__.py:4</span>：
+            每步推理前清空收件箱，把 <code>HintBlock</code> 以事件形式注入
+          </li>
+          <li>
+            <code>ToolOffloadMiddleware</code>
+            <span class="src" data-src="src/agentscope/app/middleware/__init__.py:8">__init__.py:8</span>：
+            工具超时后转后台，完成时通过消息总线回送
+          </li>
+          <li>
+            <code>StateChangeMiddleware</code>
+            <span class="src" data-src="src/agentscope/app/middleware/__init__.py:7">__init__.py:7</span>：
+            状态变化时发 <code>CustomEvent</code>
+          </li>
+        </ul>
+        <p>
+          协议适配也在这里：<code>AGUIProtocolMiddleware</code> 通过
+          <code>extra_middlewares</code> 装载，把原生 SSE 帧改写成 AG-UI 格式。
+        </p>
+
+        <h2 id="deploy">部署：uvicorn、Redis、反代</h2>
+        <p>最小生产清单：</p>
+        <ul>
+          <li>一个可用的 Redis（存储 + 消息总线）</li>
+          <li>一个 workspace 后端（LocalWorkspaceManager / Docker / E2B / K8s）</li>
+          <li>替换 <code>X-User-ID</code> 为真实鉴权</li>
+          <li>反代关闭 SSE 缓冲（<code>proxy_buffering off</code> / <code>X-Accel-Buffering: no</code>）</li>
+        </ul>
+        <p>多副本时额外注意：</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>事项</th>
+                <th>规则</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>download_secret</code></td>
+                <td>所有副本必须共享同一个值，否则下载令牌会随机失效</td>
+              </tr>
+              <tr>
+                <td><code>enable_scheduler</code></td>
+                <td>只让一个进程为 <code>True</code>，否则 cron 会在每个副本各跑一遍</td>
+              </tr>
+              <tr>
+                <td><code>enable_channel_worker</code></td>
+                <td>只让一个进程持有长连接，否则平台消息会重复投递</td>
+              </tr>
+              <tr>
+                <td>SQL schema</td>
+                <td>生产用 Alembic 迁移，不要多副本同时 <code>auto_migrate</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          单进程测试可以直接用 <code>uvicorn.run(app)</code>；生产建议
+          <code>uvicorn app:app --workers N</code> 或放在 gunicorn 后面。
+        </p>
+
+        <h2 id="compare">SDK 与服务怎么选</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>场景</th>
+                <th>用什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>本地脚本、批处理、单用户</td><td>SDK + <code>Agent</code></td></tr>
+              <tr><td>终端调试</td><td><code>launch_console</code> / <code>launch_tui</code></td></tr>
+              <tr><td>多用户、多会话、持久化</td><td>Agent Service</td></tr>
+              <tr><td>浏览器访问、SSE、断线重连</td><td>Agent Service</td></tr>
+              <tr><td>定时任务、渠道、团队协作</td><td>Agent Service</td></tr>
+              <tr><td>只想要一个库，自己接 FastAPI</td><td>SDK，自己写路由</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>建服务</td><td><code>create_app(storage, message_bus, workspace_manager)</code></td></tr>
+              <tr><td>触发运行</td><td><code>POST /chat</code></td></tr>
+              <tr><td>订阅事件</td><td><code>GET /sessions/{id}/stream</code></td></tr>
+              <tr><td>中断</td><td><code>POST /sessions/{id}/interrupt</code></td></tr>
+              <tr><td>换鉴权</td><td><code>app.dependency_overrides[get_current_user_id] = ...</code></td></tr>
+              <tr><td>加协议</td><td><code>extra_middlewares=[Middleware(AGUIProtocolMiddleware)]</code></td></tr>
+              <tr><td>加 Agent 中间件</td><td><code>extra_agent_middlewares=factory</code></td></tr>
+              <tr><td>加工具</td><td><code>extra_agent_tools=factory</code></td></tr>
+              <tr><td>多副本</td><td>共享 Redis + 共享 <code>download_secret</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">把 <code>X-User-ID</code> 当鉴权</span>
+          <p>
+            它只是占位依赖。任何人都能改 header 冒充别人。上线前一定覆盖
+            <code>get_current_user_id</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">同一会话并发 <code>POST /chat</code></span>
+          <p>
+            服务用 <code>ChatRunRegistry</code> 保证同一会话同时只跑一次，第二次返回 409。
+            要并行就建多个会话，别指望同一个会话排队。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">多副本各自跑 scheduler / channel worker</span>
+          <p>
+            cron 会在每个副本各触发一次，平台消息会重复投递。只保留一个进程开启，
+            其余通过消息总线通知持有者。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">多副本 <code>download_secret</code> 不一致</span>
+          <p>
+            一个副本签发的下载令牌会被另一个拒绝，表现为「下载随机失败」。
+            负载均衡后必须显式设置同一个值。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">反代缓冲了 SSE</span>
+          <p>
+            用户会等整段生成完才看到内容。nginx 要 <code>proxy_buffering off</code>，
+            服务端已经带了 <code>X-Accel-Buffering: no</code>，但反代配置仍要配合。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">Agent 是模板，Session 是状态</span>
+          <p>
+            更新 Agent 的 system prompt 会影响之后所有新会话，但不会重写已有会话的历史。
+            运行时状态在 <code>SessionRecord.state</code> 里。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li><code>create_app</code> 的三个必填组件分别解决什么问题？</li>
+          <li>为什么 <code>POST /chat</code> 是「触发即返回」，事件却能在之后到达？</li>
+          <li>多副本部署时，哪些开关只能有一个进程打开？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>本地起 Redis，用 <code>create_app</code> + <code>RedisStorage</code> + <code>RedisMessageBus</code> 启一个服务，打开 <code>/docs</code> 看 OpenAPI。</li>
+          <li>走一遍建 Agent → 建凭证 → 建会话 → <code>POST /chat</code> → 订阅 SSE，观察事件顺序。</li>
+          <li>在流式输出中途调用 <code>POST /sessions/{id}/interrupt</code>，确认会话回到可继续状态。</li>
+          <li>把 <code>get_current_user_id</code> 覆盖成一个固定用户，确认后续请求不再需要 <code>X-User-ID</code>。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          服务把 Agent 变成了可访问的 HTTP 端点。下一章 <strong>16 会话与 SSE</strong> 深入前后端契约：
+          会话创建与恢复、消息持久化、SSE 重连、AG-UI 事件。
+          16 章尚未发布前，可以先回 <a href="03-message-event.html">03 消息与事件</a>
+          复习事件帧格式。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

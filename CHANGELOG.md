@@ -2,6 +2,20 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.15.0 — 2026-11-07
+
+新增第 15 章「Agent Service」，把 Agent 变成多租户 HTTP 服务。
+
+- **架构**：Storage / MessageBus / WorkspaceManager / ChatService / SessionService / Agent 层中间件。
+- **`create_app`**：三个必填组件与常用可选参数，lifespan 的资源顺序。
+- **资源模型**：Agent 是模板，Session 承载 `AgentState`；Credential 可跨会话复用。
+- **流程**：建 Agent → 建凭证 → 建会话 → `POST /chat` → 订阅 SSE。
+- **会话**：同一会话只跑一次（409）、SSE 重放与扇出、`POST /interrupt`。
+- **多租户**：`X-User-ID` 是占位，必须替换；默认 `DenyAll` 资源策略。
+- **存储与总线**：Redis / SQLAlchemy、Redis / InMemory MessageBus、分布式靠共享 Redis。
+- **中间件**：ASGI 层（协议 / CORS / 鉴权）与 Agent 层（Inbox / ToolOffload / StateChange）。
+- **部署**：`download_secret`、scheduler / channel worker 单实例、SSE 反代缓冲。
+
 ## v0.14.0 — 2026-11-07
 
 新增第 14 章「终端 Console」，补上不启动 Web 的调试入口。
