@@ -1,0 +1,666 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 上下文管理：trigger/reserve/buffer 三个比例、自动压缩的五个步骤、工具结果截断、Offloader 卸载与回查、时间/任务/上下文用量/工具报错四维注入。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="06 上下文管理：压缩、卸载与环境感知 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="trigger/reserve/buffer 三个比例、自动压缩的五个步骤、工具结果截断、Offloader 卸载与回查、四维运行时状态注入。" />
+    <title>06 上下文管理：压缩、卸载与环境感知 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="06-context" data-root="..">
+    <main>
+      <article class="article">
+        <h1>06 · 上下文管理</h1>
+        <p class="lede">
+          02–05 章里，上下文一直在悄悄增长：每轮对话、每次工具调用、每条工具结果都会追加进去。
+          这一章讲清三种机制——<strong>注入</strong>、<strong>压缩</strong>、<strong>卸载</strong>——
+          以及三个决定「什么时候压、留多少」的比例。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>用 <code>trigger_ratio</code> / <code>reserve_ratio</code> / <code>context_buffer_ratio</code> 算出压缩阈值与保留量</li>
+          <li>说清一次自动压缩的五个步骤，以及摘要失败时的两条退路</li>
+          <li>接一个 <code>Offloader</code>，让被压缩的消息和截断的工具结果还能被 Read / Grep 找回</li>
+          <li>解释运行时状态注入为什么用 <code>HintBlock</code> 而不是改系统提示</li>
+        </ul>
+
+        <h2 id="why">先说为什么：上下文不是「越大越好」</h2>
+        <p>
+          上下文是智能体的工作记忆。它由三层拼成，每次模型调用前重新组装：
+        </p>
+        <div class="stack">
+          <div class="layer accent">
+            <span class="lt">系统提示</span>
+            <div class="ld">
+              你传入的 <code>system_prompt</code> + 技能指令 + <code>on_system_prompt</code> 中间件的改动。
+              这部分相对固定。
+            </div>
+          </div>
+          <div class="layer in2">
+            <span class="lt">摘要</span>
+            <div class="ld">较早消息被压缩后的结构化摘要；只有发生过压缩后才存在。</div>
+          </div>
+          <div class="layer in3">
+            <span class="lt">最近上下文</span>
+            <div class="ld">尚未压缩的消息，以及运行时状态注入的 <code>HintBlock</code>。</div>
+          </div>
+        </div>
+        <p>
+          上下文变长有三个代价：<strong>贵</strong>（token 费）、<strong>慢</strong>（首字延迟）、
+          <strong>笨</strong>（关键信息被稀释）。所以框架不是等撞墙才处理，而是持续做三件事：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>机制</th>
+                <th>解决什么</th>
+                <th>代价</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>注入</td>
+                <td>让模型知道「现在几点、任务到哪、上下文快满了」</td>
+                <td>每轮多几十个 token</td>
+              </tr>
+              <tr>
+                <td>压缩</td>
+                <td>把较早的消息变成一份摘要</td>
+                <td>一次额外的模型调用；细节会丢</td>
+              </tr>
+              <tr>
+                <td>卸载</td>
+                <td>把被移除的内容写到文件，之后还能查</td>
+                <td>需要存储与生命周期管理</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="budget">预算：三个比例决定「什么时候压、留多少」</h2>
+        <p>
+          预算的基准是 <code>model.context_size</code>，不是模型卡片上的真实窗口
+          （04 章讲过两者的区别）。三个比例定义在 <code>ContextConfig</code>
+          <span class="src" data-src="src/agentscope/agent/_config.py:51">_config.py:51</span>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>比例</th>
+                <th>默认</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>trigger_ratio</code><span class="src" data-src="src/agentscope/agent/_config.py:57">_config.py:57</span></td>
+                <td><code>0.8</code>（上限 0.9）</td>
+                <td>超过这个比例就触发硬压缩</td>
+              </tr>
+              <tr>
+                <td><code>reserve_ratio</code><span class="src" data-src="src/agentscope/agent/_config.py:62">_config.py:62</span></td>
+                <td><code>0.1</code></td>
+                <td>压缩后保留最近多少比例的 token</td>
+              </tr>
+              <tr>
+                <td><code>context_buffer_ratio</code><span class="src" data-src="src/agentscope/agent/_config.py:66">_config.py:66</span></td>
+                <td><code>0.2</code></td>
+                <td>提前多少比例开始提示「快满了」，也是自主压缩的生效区间</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          以 DeepSeek 默认的 <code>context_size=65536</code> 为例：
+        </p>
+        <pre><code>硬压缩阈值 = 0.8 × 65536 ≈ 52429 tokens
+开始提示   = (0.8 - 0.2) × 65536 ≈ 39322 tokens
+压缩后保留 = 0.1 × 65536 ≈ 6554 tokens</code></pre>
+        <p>
+          也就是说：上下文到 60% 时模型会收到「快满了」的提示；到 80% 时框架强制压缩；
+          压缩后只留最近约 10% 的消息。剩下的 10%（0.9 - 0.8 以上）是留给压缩调用本身生成摘要的空间。
+        </p>
+        <h3>两条硬校验</h3>
+        <p>
+          这些比例不是随便填的，构造 Agent 时会校验
+          <span class="src" data-src="src/agentscope/agent/_agent.py:247">_agent.py:247</span>：
+        </p>
+        <ul>
+          <li><code>reserve_ratio</code> 必须小于 <code>trigger_ratio</code><span class="src" data-src="src/agentscope/agent/_agent.py:256">_agent.py:256</span></li>
+          <li>
+            如果开了运行时注入或自主压缩，<code>context_buffer_ratio</code> 也必须小于
+            <code>trigger_ratio</code><span class="src" data-src="src/agentscope/agent/_agent.py:269">_agent.py:269</span>
+          </li>
+        </ul>
+        <p>
+          否则抛 <code>ValueError</code>，因为「提示还没发出去就已经开始硬压缩」没有意义。
+        </p>
+        <div class="callout tip">
+          <span class="ct">压缩是自动的，不用你手动调</span>
+          <p>
+            每次推理前都会先调用一次 <code>compress_context()</code>
+            <span class="src" data-src="src/agentscope/agent/_agent.py:1186">_agent.py:1186</span>；
+            没超过阈值时它是空操作。你手动调只是提前触发。
+          </p>
+        </div>
+
+        <h2 id="compress">自动压缩：一次压缩的五个步骤</h2>
+        <p>
+          入口是 <code>compress_context()</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:387">_agent.py:387</span>，
+          真正实现是 <code>_compress_context_impl()</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:491">_agent.py:491</span>。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>步骤</th>
+                <th>做什么</th>
+                <th>关键点</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>1. 限制图片</td>
+                <td>超过 <code>max_image_num</code> 的旧图片先卸载或删除<span class="src" data-src="src/agentscope/agent/_agent.py:512">_agent.py:512</span></td>
+                <td>先减图片，再算 token 才准</td>
+              </tr>
+              <tr>
+                <td>2. 数 token</td>
+                <td>把系统提示、摘要、上下文、工具 schema 一起估算<span class="src" data-src="src/agentscope/agent/_agent.py:516">_agent.py:516</span></td>
+                <td>用 <code>count_tokens</code>，是字节/4 的粗估</td>
+              </tr>
+              <tr>
+                <td>3. 判阈值</td>
+                <td>低于 <code>trigger_ratio × context_size</code> 直接返回<span class="src" data-src="src/agentscope/agent/_agent.py:519">_agent.py:519</span></td>
+                <td>空操作，不产生模型调用</td>
+              </tr>
+              <tr>
+                <td>4. 切分</td>
+                <td>按 <code>reserve_ratio</code> 留最近消息，其余待压缩<span class="src" data-src="src/agentscope/agent/_agent.py:549">_agent.py:549</span></td>
+                <td>工具调用 / 结果对保持成对，未完成的调用不移动</td>
+              </tr>
+              <tr>
+                <td>5. 生成摘要并更新</td>
+                <td>用结构化输出生成五字段摘要，替换旧消息<span class="src" data-src="src/agentscope/agent/_agent.py:642">_agent.py:642</span></td>
+                <td>摘要本身也消耗 token，会计入用量</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>摘要长什么样</h3>
+        <p>
+          <code>SummarySchema</code>
+          <span class="src" data-src="src/agentscope/agent/_config.py:9">_config.py:9</span>
+          固定了五个字段，避免模型写成一锅粥：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>要求模型写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>task_overview</code></td>
+                <td>用户的核心请求、成功标准、约束</td>
+              </tr>
+              <tr>
+                <td><code>current_state</code></td>
+                <td>已完成什么、改过哪些文件、产出什么</td>
+              </tr>
+              <tr>
+                <td><code>important_discoveries</code></td>
+                <td>技术约束、做过的决定、踩过的坑</td>
+              </tr>
+              <tr>
+                <td><code>next_steps</code></td>
+                <td>下一步做什么、阻塞点、优先级</td>
+              </tr>
+              <tr>
+                <td><code>context_to_preserve</code></td>
+                <td>用户偏好、领域细节、承诺过的事</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          摘要提示词还专门要求「自包含」：时间转成绝对日期，文件用完整路径，命令和报错原样保留
+          <span class="src" data-src="src/agentscope/agent/_config.py:82">_config.py:82</span>。
+          因为这份摘要之后可能被再次压缩，指代「上面那个文件」会彻底失效。
+        </p>
+        <h3>失败时的四条退路</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>情况</th>
+                <th>行为</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>系统提示 + 摘要本身就超阈值</td>
+                <td>直接抛 <code>RuntimeError</code>，无法压缩<span class="src" data-src="src/agentscope/agent/_agent.py:531">_agent.py:531</span></td>
+              </tr>
+              <tr>
+                <td><code>reserve_ratio</code> 太大，没有可压的消息</td>
+                <td>把保留量降为 0 再切一次<span class="src" data-src="src/agentscope/agent/_agent.py:554">_agent.py:554</span></td>
+              </tr>
+              <tr>
+                <td>压缩调用本身超长</td>
+                <td>从最旧的消息开始丢，再重试<span class="src" data-src="src/agentscope/agent/_agent.py:647">_agent.py:647</span></td>
+              </tr>
+              <tr>
+                <td>摘要始终生成失败</td>
+                <td>默认退化为「截断最早消息」；<code>compression_fallback_to_truncation=False</code> 则抛错<span class="src" data-src="src/agentscope/agent/_agent.py:688">_agent.py:688</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>手动压缩与自主压缩</h3>
+        <pre><code>from agentscope.agent import ContextConfig
+from agentscope.message import HintBlock
+
+
+async def compress_now(agent) -&gt; None:
+    # 用 Agent 自己的配置
+    await agent.compress_context()
+
+    # 单次覆盖：更激进地压
+    await agent.compress_context(
+        context_config=ContextConfig(trigger_ratio=0.6, reserve_ratio=0.1),
+    )
+
+    # 告诉摘要「必须保留什么」
+    await agent.compress_context(
+        instructions=HintBlock(hint="保留所有文件路径与 API 签名。"),
+    )</code></pre>
+        <p>
+          把 <code>compression_tool_enabled</code> 设为 <code>True</code> 后，模型会拿到一个
+          <code>CompressContext</code> 工具，可以自己决定「在两件事的交界处」压缩，而不是等硬阈值
+          <span class="src" data-src="src/agentscope/agent/_agent.py:443">_agent.py:443</span>。
+          工具内部按 <code>trigger_ratio - context_buffer_ratio</code> 判断，没进缓冲区调用也不会变化；
+          它始终放行，不受权限确认影响。
+        </p>
+
+        <h2 id="toolresult">工具结果截断：先保留，再卸载</h2>
+        <p>
+          工具结果是最容易撑爆上下文的东西：一次 <code>cat</code> 或一次搜索可能几十万字符。
+          每次工具执行完后，框架会单独检查它是否超过 <code>tool_result_limit</code>（默认
+          <code>50000</code> token）
+          <span class="src" data-src="src/agentscope/agent/_config.py:146">_config.py:146</span>。
+        </p>
+        <pre><code>超出限额时：
+
+[保留部分] + &lt;&lt;&lt;TRUNCATED&gt;&gt;&gt;
+&lt;system-reminder&gt;The remaining content has been omitted for limited context.
+You can refer to the file in '/path/to/tool_result-xxx.txt' for the truncated content if needed.
+&lt;/system-reminder&gt;</code></pre>
+        <p>
+          切分逻辑在 <code>_split_tool_result_for_compression()</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:3071">_agent.py:3071</span>：
+          按 token 找边界，文本块按比例截断，剩下的部分交给 offloader。标记的拼接在
+          <span class="src" data-src="src/agentscope/agent/_agent.py:2650">_agent.py:2650</span>。
+        </p>
+        <div class="callout warn">
+          <span class="ct">没有 offloader 时，截断的部分就真的没了</span>
+          <p>
+            标记只会写「已被省略」，不会给路径。模型之后想查也查不到，只能重新执行工具。
+            长任务建议一开始就挂上 offloader。
+          </p>
+        </div>
+
+        <h2 id="offload">卸载：Offloader 协议与工作区目录</h2>
+        <p>
+          Offloader 是一个结构化协议
+          <span class="src" data-src="src/agentscope/workspace/_offload_protocol.py:11">_offload_protocol.py:11</span>，
+          实际有三个方法：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>方法</th>
+                <th>持久化什么</th>
+                <th>返回</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>offload_data_block(block)</code><span class="src" data-src="src/agentscope/workspace/_offload_protocol.py:11">_offload_protocol.py:11</span></td>
+                <td>图片、音频等二进制块</td>
+                <td>改成 <code>workspace://</code> URL 的块</td>
+              </tr>
+              <tr>
+                <td><code>offload_context(session_id, msgs)</code><span class="src" data-src="src/agentscope/workspace/_offload_protocol.py:25">_offload_protocol.py:25</span></td>
+                <td>被压缩的整段消息</td>
+                <td>可读路径</td>
+              </tr>
+              <tr>
+                <td><code>offload_tool_result(session_id, tool_result)</code><span class="src" data-src="src/agentscope/workspace/_offload_protocol.py:43">_offload_protocol.py:43</span></td>
+                <td>被截断的工具结果</td>
+                <td>可读路径</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          所有内置工作区都实现了它。用 <code>LocalWorkspace</code>
+          <span class="src" data-src="src/agentscope/workspace/_local_workspace.py:65">_local_workspace.py:65</span>
+          挂载最简单：
+        </p>
+        <pre><code>from agentscope.agent import Agent, ContextConfig, InjectionConfig
+from agentscope.workspace import LocalWorkspace
+
+
+async def build_agent(model, toolkit):
+    workspace = LocalWorkspace(workdir="/tmp/agent_workspace")
+    await workspace.initialize()
+
+    agent = Agent(
+        name="Friday",
+        system_prompt="You are a helpful assistant.",
+        model=model,
+        toolkit=toolkit,
+        offloader=workspace,
+        context_config=ContextConfig(
+            trigger_ratio=0.8,
+            reserve_ratio=0.1,
+            context_buffer_ratio=0.2,
+            tool_result_limit=3000,
+            max_image_num=5,
+            compression_tool_enabled=True,
+        ),
+        injection_config=InjectionConfig(
+            timezone="Asia/Shanghai",
+            time_interval=1.0,
+        ),
+    )
+    return agent, workspace</code></pre>
+        <p>用完记得 <code>await workspace.close()</code>。目录结构是固定的：</p>
+        <pre><code>{workdir}/
+├── data/
+│   └── {sha256}.png                 # 多模态文件，按内容哈希去重
+└── sessions/
+    └── {session_id}/
+        ├── context.jsonl            # 被压缩的消息，一行一条
+        └── tool_result-{id}.txt     # 被截断的工具结果</code></pre>
+        <p>
+          按 <code>session_id</code> 隔离，多个会话并发也不会互相覆盖
+          <span class="src" data-src="src/agentscope/workspace/_base.py:1013">_base.py:1013</span>。
+        </p>
+        <h3>自定义 Offloader</h3>
+        <p>
+          协议是结构化的，不需要继承，实现三个方法即可：
+        </p>
+        <pre><code>class S3Offloader:
+    async def offload_context(self, session_id: str, msgs: list) -&gt; str:
+        ...
+
+    async def offload_tool_result(self, session_id: str, tool_result) -&gt; str:
+        ...
+
+    async def offload_data_block(self, block):
+        ...</code></pre>
+        <p>
+          把实例传给 <code>Agent(offloader=...)</code> 就生效。返回的字符串会原样写进提示里，
+          所以要么是模型能读的路径，要么是它能理解的 URL。
+        </p>
+
+        <h2 id="inject">环境感知：四个维度的注入</h2>
+        <p>
+          压缩是「删」，注入是「补」。运行时状态会以 <code>HintBlock</code> 追加到上下文，
+          让模型持续感知四类会变化的信息
+          <span class="src" data-src="src/agentscope/agent/_agent.py:1366">_agent.py:1366</span>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>维度</th>
+                <th>注入内容</th>
+                <th>触发时机</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>时间</td>
+                <td>当前时间 + 时区</td>
+                <td>上下文里没有时间记录，或距上次超过 <code>time_interval</code> 小时</td>
+              </tr>
+              <tr>
+                <td>任务</td>
+                <td>进行中 / 待处理任务数量，提醒用 <code>TaskList</code></td>
+                <td>有未完成任务，且上下文中没有任务工具调用或旧注入</td>
+              </tr>
+              <tr>
+                <td>上下文用量</td>
+                <td>当前 token 与压缩阈值；开了自主压缩还会提示「现在可以压」</td>
+                <td>回复第一轮，且进入 <code>context_buffer_ratio</code> 缓冲区</td>
+              </tr>
+              <tr>
+                <td>工具报错</td>
+                <td>「同一个调用连续失败 N 次，别再原样重试」</td>
+                <td>同名同参数连续失败达到 <code>tool_retries_limit</code>（默认 3）</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>一条典型注入长这样：</p>
+        <pre><code>&lt;system-reminder&gt;Treat the following as the ground truth at this point of the
+conversation. Anything stated earlier is outdated, and a later reminder, if any,
+supersedes this one:
+&lt;current-time&gt;2026-11-06T22:30:00&lt;/current-time&gt;
+&lt;timezone&gt;Asia/Shanghai&lt;/timezone&gt;
+&lt;tasks&gt;You have 1 in-progress tasks and 2 pending tasks. Use `TaskList` to view them.&lt;/tasks&gt;
+&lt;tool-error&gt;The last 3 calls to 'Bash' with the same arguments all failed. Stop retrying...&lt;/tool-error&gt;
+&lt;/system-reminder&gt;</code></pre>
+        <h3>三个设计要点</h3>
+        <ul>
+          <li>
+            <strong>注入是持久的</strong>：它真的写进上下文，不是临时拼一下。这样模型能感知时间流逝
+            和每一步做了什么
+            <span class="src" data-src="src/agentscope/agent/_agent.py:1373">_agent.py:1373</span>。
+          </li>
+          <li>
+            <strong>用 <code>HintBlock</code> 而不是改系统提示</strong>：系统提示不变，prompt caching 仍然有效
+            <span class="src" data-src="src/agentscope/agent/_agent.py:1377">_agent.py:1377</span>。
+          </li>
+          <li>
+            <strong>只注入会变的信息</strong>：身份、长期指令这类固定内容应该放系统提示。混在一起会让缓存失效、
+            也让模型分不清哪条是长期约束
+            <span class="src" data-src="src/agentscope/agent/_agent.py:1381">_agent.py:1381</span>。
+          </li>
+        </ul>
+        <p>
+          注入发生时，<code>reply_stream()</code> 会额外产出一个 <code>HintBlockEvent</code>
+          （<code>emit_hint_event=True</code> 时），前端可以据此显示「环境已更新」。
+        </p>
+        <h3>自定义字段</h3>
+        <pre><code>from agentscope.agent import InjectionConfig
+
+injection_config = InjectionConfig(
+    timezone="Asia/Shanghai",
+    time_interval=1.0,
+    extra_fields={
+        "battery-level": "78%",
+        "location": "杭州办公室",
+    },
+)</code></pre>
+        <p>
+          自定义字段会附在<strong>每一次</strong>注入里，但自己不会触发注入
+          <span class="src" data-src="src/agentscope/agent/_config.py:342">_config.py:342</span>。
+          模板必须包含 <code>{runtime_state}</code> 占位符，否则构造时就报错
+          <span class="src" data-src="src/agentscope/agent/_config.py:308">_config.py:308</span>。
+        </p>
+
+        <h2 id="config">配置速查：ContextConfig 与 InjectionConfig</h2>
+        <h3>ContextConfig</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>默认</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>trigger_ratio</code></td><td>0.8</td><td>硬压缩阈值，上限 0.9</td></tr>
+              <tr><td><code>reserve_ratio</code></td><td>0.1</td><td>压缩后保留比例，必须小于 trigger</td></tr>
+              <tr><td><code>context_buffer_ratio</code></td><td>0.2</td><td>提前提示与自主压缩区间</td></tr>
+              <tr><td><code>tool_result_limit</code></td><td>50000</td><td>单条工具结果 token 上限</td></tr>
+              <tr><td><code>max_image_num</code></td><td>5</td><td>上下文保留图片数，超出从最旧开始移除</td></tr>
+              <tr><td><code>compression_tool_enabled</code></td><td>False</td><td>是否暴露 <code>CompressContext</code></td></tr>
+              <tr><td><code>compression_fallback_to_truncation</code></td><td>True</td><td>摘要失败是否退化为截断</td></tr>
+              <tr><td><code>summary_schema</code></td><td>五字段</td><td>摘要的结构化 schema</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>InjectionConfig</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>默认</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>inject_runtime_state</code></td><td>True</td><td>总开关</td></tr>
+              <tr><td><code>timezone</code></td><td>UTC</td><td>注入时区</td></tr>
+              <tr><td><code>time_format</code></td><td>ISO</td><td>必须带日期，否则每次都重新注入</td></tr>
+              <tr><td><code>time_interval</code></td><td>0.5</td><td>小时；距上次超过才刷新</td></tr>
+              <tr><td><code>tool_retries_limit</code></td><td>3</td><td>连续失败多少次注入提示，最小 3</td></tr>
+              <tr><td><code>extra_fields</code></td><td>{}</td><td>自定义字段，不单独触发注入</td></tr>
+              <tr><td><code>emit_hint_event</code></td><td>True</td><td>是否产出 <code>HintBlockEvent</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>改压缩阈值</td><td><code>ContextConfig(trigger_ratio=0.8)</code></td></tr>
+              <tr><td>压缩后多留一点</td><td><code>reserve_ratio=0.2</code>（必须小于 trigger）</td></tr>
+              <tr><td>让模型自己决定何时压</td><td><code>compression_tool_enabled=True</code></td></tr>
+              <tr><td>手动压一次</td><td><code>await agent.compress_context()</code></td></tr>
+              <tr><td>引导摘要保留什么</td><td><code>instructions=HintBlock(hint=...)</code></td></tr>
+              <tr><td>截断大工具结果</td><td><code>tool_result_limit=3000</code></td></tr>
+              <tr><td>让截断内容可回查</td><td><code>offloader=LocalWorkspace(...)</code></td></tr>
+              <tr><td>改注入时区</td><td><code>InjectionConfig(timezone="Asia/Shanghai")</code></td></tr>
+              <tr><td>关掉注入</td><td><code>InjectionConfig(inject_runtime_state=False)</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">拿模型卡片的窗口当预算</span>
+          <p>
+            压缩用的是 <code>model.context_size</code>（DeepSeek 默认 65536），不是卡片上的 1,000,000。
+            如果你希望按真实窗口预算，显式把 <code>context_size</code> 调到接近卡片值，否则会过早压缩。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">比例组合直接抛 <code>ValueError</code></span>
+          <p>
+            <code>reserve_ratio &gt;= trigger_ratio</code>，或开了注入时
+            <code>context_buffer_ratio &gt;= trigger_ratio</code>，Agent 构造就会失败
+            <span class="src" data-src="src/agentscope/agent/_agent.py:247">_agent.py:247</span>。
+            调参时先保证 <code>buffer &lt; trigger</code> 且 <code>reserve &lt; trigger</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">压缩发生在一件事做到一半</span>
+          <p>
+            硬阈值不会等你收尾。开启 <code>compression_tool_enabled</code>，并在系统提示里要求模型
+            「完成任务后、开始下一件事前调用 CompressContext」，摘要质量会明显更好
+            <span class="src" data-src="src/agentscope/agent/_agent.py:447">_agent.py:447</span>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">以为压缩是免费的</span>
+          <p>
+            压缩本身是一次模型调用，输入是「系统提示 + 待压缩消息 + 压缩提示」，输出是摘要。
+            这次调用的 token 会记在上下文尾部
+            <span class="src" data-src="src/agentscope/agent/_agent.py:770">_agent.py:770</span>。
+            频繁手动压缩会显著增加成本。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct"><code>tool_result_limit</code> 不是越小越好</span>
+          <p>
+            设得太低，模型会错过关键输出（比如测试报错的最后几行），然后反复重跑工具。
+            先用默认 50000，发现某类结果特别大再针对性调。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">卸载后要让模型知道去哪找</span>
+          <p>
+            框架会自动在提示里写路径。如果你自定义 Offloader，返回的路径必须是模型能用
+            <code>Read</code> / <code>Grep</code> 打开的，否则等于没存。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li><code>context_size=100000</code>、<code>trigger_ratio=0.7</code>、<code>buffer=0.2</code> 时，第几轮开始提示「快满了」？</li>
+          <li>压缩时为什么「未完成的工具调用」不能被移进摘要？</li>
+          <li>没有挂 offloader 时，被压缩的消息和被截断的工具结果分别去哪了？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>把 <code>tool_result_limit</code> 设为 200，执行一次输出很长的 Bash，观察截断标记与模型后续行为。</li>
+          <li>挂上 <code>LocalWorkspace</code>，重复上一步，去 <code>sessions/{id}/</code> 里找到 <code>tool_result-*.txt</code>。</li>
+          <li>把 <code>timezone</code> 改成 <code>Asia/Shanghai</code>、<code>time_interval=0.01</code>，连续两轮对话，观察 <code>HintBlockEvent</code> 里的时间。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          上下文管好了，下一章 <strong>07 中间件</strong> 讲怎么在这些流程上挂自己的逻辑：
+          推理前改写输入、工具执行前后审计、压缩时保留业务字段。
+          07 章尚未发布前，可以先回 <a href="05-tool.html">05 工具系统</a> 复习工具执行链。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
