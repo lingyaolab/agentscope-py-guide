@@ -2,6 +2,19 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.14.0 — 2026-11-07
+
+新增第 14 章「终端 Console」，补上不启动 Web 的调试入口。
+
+- **`launch_console`**：输入循环、流式渲染、工具确认、`Ctrl+C` 中断，四个参数。
+- **`ConsoleRenderer`**：被动渲染事件流，`render()` / `last_msg`，可跨 Agent 复用。
+- **详细程度**：`quiet` / `default` / `debug` 三档各显示什么。
+- **确认交互**：`y` 允许一次、`a` 接受规则、其他拒绝，`Ctrl+C` 的两种语义。
+- **`launch_tui`**：Textual 全屏、Markdown、折叠、键盘确认与 `AskUser` 表单。
+- **实时语音**：`launch_realtime_ui` 的借用语义与打断方式。
+- **组件嵌入**：`ChatUI` / `MessagesUI` 的 Textual 消息与更新方法。
+- **选型**：Console / TUI / Agent Service 的适用边界。
+
 ## v0.13.0 — 2026-11-07
 
 新增第 13 章「中断、恢复与状态」，把长任务的暂停与续跑讲完整。
