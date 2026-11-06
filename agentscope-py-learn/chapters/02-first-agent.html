@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 第一个 Agent：用 FunctionTool 写一个会查天气的 Agent，讲清 ReAct 循环、工具 schema、终止条件、AgentState 与流式事件顺序。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="02 第一个 Agent：从 ReAct 循环到一条完整回复 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="用 FunctionTool 写一个会查天气的 Agent，讲清 ReAct 循环、工具 schema、终止条件、AgentState 与流式事件顺序。" />
+    <title>02 第一个 Agent：从 ReAct 循环到一条完整回复 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="02-first-agent" data-root="..">
+    <main>
+      <article class="article">
+        <h1>02 · 第一个 Agent</h1>
+        <p class="lede">
+          01 章的 Agent 没有工具，所以它只调用了一次模型就结束。这一章给它装上一个真正的工具，把
+          <strong>reasoning → acting → 再 reasoning</strong> 的循环跑出来，并讲清三件事：
+          工具函数怎么变成模型能看懂的 schema、一次 <code>reply()</code> 里到底转了几圈、以及它为什么会停。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>用 <code>FunctionTool</code> 把一个普通 Python 函数变成 Agent 可调用的工具，并解释它生成的 schema 从哪来</li>
+          <li>画出一次 <code>reply()</code> 的循环：哪一步调用模型、哪一步执行工具、<code>cur_iter</code> 什么时候加一</li>
+          <li>看懂 <code>finished_reason</code> 的四种取值，知道 <code>max_iters=50</code> 限制的是什么</li>
+        </ul>
+
+        <h2 id="why">先说为什么：ReAct 不是「一次模型调用」</h2>
+        <p>
+          只调用一次模型时，模型只能基于「你给它的输入」回答。它没有办法在回答前查天气、读文件、跑测试——
+          因为这些动作必须由外部代码执行，而模型只会输出文本。
+        </p>
+        <p>
+          ReAct 的做法是：把「可用的工具」一起告诉模型。模型如果觉得需要，就先输出一个<strong>工具调用请求</strong>；
+          框架执行工具，把结果追加回上下文；模型看到结果后继续推理，直到它输出一段纯文本作为最终回答。
+        </p>
+        <div class="stack">
+          <div class="layer accent">
+            <span class="lt">Reasoning（推理）</span>
+            <div class="ld">把系统提示、历史消息、工具 schema 一起发给模型，拿回文本或工具调用请求。</div>
+          </div>
+          <div class="layer in2">
+            <span class="lt">Acting（行动）</span>
+            <div class="ld">对每个工具调用做权限检查，执行本地工具，把结果写成 <code>ToolResultBlock</code> 放回上下文。</div>
+          </div>
+          <div class="layer in3">
+            <span class="lt">Exit（退出）</span>
+            <div class="ld">模型这一轮只产出文本、没有工具调用，就把它作为最终 <code>Msg</code> 返回。</div>
+          </div>
+        </div>
+        <p>
+          这个「下一步该做什么」的判断集中在
+          <span class="src" data-src="src/agentscope/agent/_agent.py:3512">_agent.py:3512</span>
+          的 <code>_next_action()</code>，返回三种动作之一：<code>Reasoning</code>、<code>Acting</code>、<code>Exit</code>。
+          整个循环就是一个 <code>while True</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:1143">_agent.py:1143</span>，
+          没有隐藏的递归。
+        </p>
+
+        <h2 id="minimal">最小可跑：一个能查天气的 Agent</h2>
+        <p>在 01 章的环境里新建一个 <code>main.py</code>，只需要一个工具函数：</p>
+        <pre><code>import asyncio
+import os
+
+from agentscope.agent import Agent
+from agentscope.credential import DeepSeekCredential
+from agentscope.message import UserMsg
+from agentscope.model import DeepSeekChatModel
+from agentscope.tool import FunctionTool, Toolkit
+
+
+def get_weather(city: str) -&gt; str:
+    """查询指定城市的当前天气。
+
+    Args:
+        city: 城市名称，例如 "杭州"。
+    """
+    # 演示用假数据；真实项目里换成和风 / 高德 / OpenWeather 的 HTTP 调用
+    fake = {"杭州": "晴，22°C", "北京": "多云，18°C"}
+    return fake.get(city, f"暂无 {city} 的天气数据")
+
+
+async def main() -&gt; None:
+    agent = Agent(
+        name="Friday",
+        system_prompt="你是一个乐于助人的助手。需要天气信息时调用 get_weather。",
+        model=DeepSeekChatModel(
+            credential=DeepSeekCredential(
+                api_key=os.environ["DEEPSEEK_API_KEY"],
+            ),
+            model="deepseek-chat",
+        ),
+        toolkit=Toolkit(tools=[FunctionTool(get_weather, is_read_only=True)]),
+    )
+
+    msg = await agent.reply(
+        UserMsg(name="user", content="杭州今天天气怎么样？"),
+    )
+
+    print(msg.get_text_content())
+    print("finished_reason:", msg.finished_reason)
+    print("usage:", msg.usage)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())</code></pre>
+        <p>运行后你会看到类似这样的输出（天气内容来自工具，不是模型编的）：</p>
+        <pre><code>杭州今天晴，气温 22°C。
+finished_reason: completed
+usage: Usage(input_tokens=..., output_tokens=..., ...)</code></pre>
+        <div class="callout tip">
+          <span class="ct">为什么是 <code>is_read_only=True</code></span>
+          <p>
+            <code>FunctionTool</code> 默认走 <strong>ASK</strong> 权限
+            <span class="src" data-src="src/agentscope/tool/_adapters.py:134">_adapters.py:134</span>：
+            每次调用都要用户确认，否则 <code>reply()</code> 会停在「等待确认」。
+            查天气没有副作用，标记为只读后，DEFAULT 模式会走只读快速通道直接放行
+            <span class="src" data-src="src/agentscope/tool/_base.py:298">_base.py:298</span>。
+            权限系统本身是 08 章的主题，这里先借用「只读」这个语义。
+          </p>
+        </div>
+
+        <h2 id="line-by-line">逐行解读：工具函数怎么变成 schema</h2>
+        <h3>1. 工具名、描述、参数 schema 都是自动推导的</h3>
+        <p>
+          <code>FunctionTool(func)</code> 只做三件事
+          <span class="src" data-src="src/agentscope/tool/_adapters.py:57">_adapters.py:57</span>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>来源</th>
+                <th>本例的值</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>name</code></td>
+                <td>函数名（可用 <code>name=</code> 覆盖）</td>
+                <td><code>get_weather</code></td>
+              </tr>
+              <tr>
+                <td><code>description</code></td>
+                <td>docstring 的短描述 + 长描述（可用 <code>description=</code> 覆盖）</td>
+                <td>「查询指定城市的当前天气。」</td>
+              </tr>
+              <tr>
+                <td><code>input_schema</code></td>
+                <td>类型注解 + docstring 的 <code>Args:</code>（可用 <code>input_schema=</code> 覆盖）</td>
+                <td><code>{"city": {"type": "string", ...}}</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          这意味着两件事：<strong>函数最好有类型注解</strong>（缺失会退化成 <code>Any</code>，schema 失去类型约束），
+          <strong>docstring 用 <code>Args:</code> 格式</strong>。
+          少任何一个，模型看到的参数说明就会缺一块，工具调用成功率会明显下降。
+        </p>
+
+        <h3>2. 需要更复杂的约束时，直接传 Pydantic 模型</h3>
+        <pre><code>from pydantic import BaseModel, Field
+
+
+class WeatherInput(BaseModel):
+    city: str
+    days: int = Field(default=1, ge=1, le=7)
+
+
+def get_forecast(city: str, days: int = 1) -&gt; str:
+    return f"{city} 未来 {days} 天以晴为主"
+
+
+weather_tool = FunctionTool(get_forecast, input_schema=WeatherInput)</code></pre>
+        <p>
+          枚举、数值范围、嵌套对象这类约束，用 Pydantic 模型表达最稳；自动推导只适合简单签名。
+        </p>
+
+        <h3>3. Toolkit 是工具的唯一入口</h3>
+        <p>
+          <code>Toolkit(tools=[...])</code> 会把工具放进名为 <code>basic</code> 的默认工具组
+          <span class="src" data-src="src/agentscope/tool/_toolkit.py:88">_toolkit.py:88</span>。
+          除了普通工具，它还负责注册 MCP 服务与技能——所以后面接 MCP 时，改的也是同一个对象。
+        </p>
+
+        <h3>4. 最终文本用 <code>get_text_content()</code> 取</h3>
+        <p>
+          <code>Msg.content</code> 是内容块列表，可能包含文本、思考、工具调用、工具结果。
+          <code>get_text_content()</code>
+          <span class="src" data-src="src/agentscope/message/_base.py:155">_base.py:155</span>
+          把所有 <code>TextBlock</code> 拼成一个字符串；没有文本时返回 <code>None</code>。
+        </p>
+
+        <h2 id="loop">循环：一次 reply 里到底转了几圈</h2>
+        <p>以「杭州天气」为例，一次 <code>reply()</code> 通常会转 <strong>两圈</strong>：</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>圈</th>
+                <th>这一步做什么</th>
+                <th>模型看到什么</th>
+                <th>模型输出什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>第 1 圈 reasoning</td>
+                <td>组装输入并调用模型</td>
+                <td>系统提示 + 用户问题 + <code>get_weather</code> 的 schema</td>
+                <td><code>ToolCallBlock(name="get_weather", input="{\"city\":\"杭州\"}")</code></td>
+              </tr>
+              <tr>
+                <td>第 1 圈 acting</td>
+                <td>权限检查 → 执行工具 → 写回结果</td>
+                <td>—</td>
+                <td><code>ToolResultBlock(output="晴，22°C")</code></td>
+              </tr>
+              <tr>
+                <td>第 2 圈 reasoning</td>
+                <td>带着工具结果再调用模型</td>
+                <td>上面的工具结果</td>
+                <td>纯文本「杭州今天晴，气温 22°C。」</td>
+              </tr>
+              <tr>
+                <td>Exit</td>
+                <td>没有工具调用，收口</td>
+                <td>—</td>
+                <td>最终 <code>Msg</code>，<code>finished_reason=completed</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>对应到源码，关键调用点只有五个：</p>
+        <ol>
+          <li>
+            组装模型输入：<code>_prepare_model_input()</code>
+            <span class="src" data-src="src/agentscope/agent/_agent.py:3253">_agent.py:3253</span>
+            把历史消息和工具 schema 一起准备好。
+          </li>
+          <li>
+            调用模型：<code>_call_model()</code>
+            <span class="src" data-src="src/agentscope/agent/_agent.py:3291">_agent.py:3291</span>。
+          </li>
+          <li>
+            权限检查：<code>_check_permission()</code>
+            <span class="src" data-src="src/agentscope/agent/_agent.py:2340">_agent.py:2340</span>。
+          </li>
+          <li>
+            执行工具：<code>_execute_tool_call()</code>
+            <span class="src" data-src="src/agentscope/agent/_agent.py:2431">_agent.py:2431</span>
+            → <code>_acting_impl()</code>
+            <span class="src" data-src="src/agentscope/agent/_agent.py:2785">_agent.py:2785</span>
+            → <code>toolkit.call_tool()</code>。
+          </li>
+          <li>
+            轮次计数：当这一轮产生的工具调用<strong>全部拿到结果</strong>后，<code>cur_iter += 1</code>
+            <span class="src" data-src="src/agentscope/agent/_agent.py:1269">_agent.py:1269</span>。
+          </li>
+        </ol>
+        <div class="callout">
+          <span class="ct">「一圈」的边界不是模型调用次数</span>
+          <p>
+            如果模型一次返回了 3 个工具调用，框架会把它们都执行完，然后才把
+            <code>cur_iter</code> 加一。所以 <code>max_iters</code> 数的是<strong>完整的
+            reasoning-acting 轮次</strong>，不是模型调用次数，也不是工具调用次数。
+          </p>
+        </div>
+
+        <h2 id="termination">终止条件：什么时候停，什么时候超限</h2>
+        <p>
+          <code>reasoning-acting</code> 循环的退出逻辑在 <code>_next_action()</code> 里，共有四种结局：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th><code>finished_reason</code></th>
+                <th>触发条件</th>
+                <th>你拿到什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>completed</code></td>
+                <td>模型这一轮只产出文本、没有工具调用</td>
+                <td>正常的最终回答<span class="src" data-src="src/agentscope/agent/_agent.py:3672">_agent.py:3672</span></td>
+              </tr>
+              <tr>
+                <td><code>exceed_max_iters</code></td>
+                <td>轮次达到 <code>max_iters</code>，或强制收尾后仍无文本</td>
+                <td>通常是「已完成工作的总结」，也可能是一句超限提示<span class="src" data-src="src/agentscope/agent/_agent.py:3736">_agent.py:3736</span></td>
+              </tr>
+              <tr>
+                <td><code>interrupted</code></td>
+                <td>用户中断，或流式响应被取消</td>
+                <td>已产出的内容 + 未完成工具调用的关闭结果<span class="src" data-src="src/agentscope/agent/_agent.py:1278">_agent.py:1278</span></td>
+              </tr>
+              <tr>
+                <td><code>error</code></td>
+                <td>模型调用或框架内部抛错</td>
+                <td>结构化 <code>error</code> 字段</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          默认上限是 <strong>50</strong> 轮
+          <span class="src" data-src="src/agentscope/agent/_config.py:367">_config.py:367</span>，
+          可以这样改：
+        </p>
+        <pre><code>from agentscope.agent import Agent, ReActConfig
+
+agent = Agent(
+    ...,
+    react_config=ReActConfig(max_iters=10),
+)</code></pre>
+        <div class="callout warn">
+          <span class="ct">达到上限时框架还会再试一次</span>
+          <p>
+            轮次刚好等于 <code>max_iters</code> 时，框架不会立刻放弃，而是追加一次
+            <strong>禁用工具</strong>的模型调用，要求它总结已有进展
+            <span class="src" data-src="src/agentscope/agent/_agent.py:3718">_agent.py:3718</span>。
+            这次调用有文本，你仍能拿到内容，但 <code>finished_reason</code> 是
+            <code>exceed_max_iters</code>。如果连这次也没有文本，才返回固定的超限提示。
+          </p>
+        </div>
+        <p>
+          另外，结构化输出会额外获得 <code>structured_output_grace_iters</code>（默认 5）轮宽限
+          <span class="src" data-src="src/agentscope/agent/_config.py:373">_config.py:373</span>，
+          防止模型因为忙着调工具而没来得及提交结果。结构化输出不在本章展开。
+        </p>
+
+        <h2 id="state">状态：对话历史放在哪，为什么 Agent 无状态</h2>
+        <p>
+          <code>Agent</code> 本身不保存对话；它把状态放在 <code>self.state</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:175">_agent.py:175</span>。
+          不传 <code>state</code> 时新建一份 <code>AgentState()</code>，传了就复用。
+        </p>
+        <p><code>AgentState</code> 里和本章相关的是这几块：</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>存什么</th>
+                <th>谁会读写</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>context</code></td>
+                <td>完整对话历史：用户消息、助手消息、工具调用与结果</td>
+                <td>每次 reasoning / acting 都追加</td>
+              </tr>
+              <tr>
+                <td><code>summary</code></td>
+                <td>上下文压缩后的摘要</td>
+                <td>06 章</td>
+              </tr>
+              <tr>
+                <td><code>reply_context</code></td>
+                <td>当前 reply 的 id、轮次、结构化输出</td>
+                <td>循环本身</td>
+              </tr>
+              <tr>
+                <td><code>permission_context</code></td>
+                <td>权限模式与规则</td>
+                <td>08 章</td>
+              </tr>
+              <tr>
+                <td><code>tool_context</code></td>
+                <td>工具激活状态、读文件缓存</td>
+                <td>工具系统</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          这就是「无状态引擎」的含义：<strong>同一个 Agent 实例连续调用 <code>reply()</code> 会记得上一轮</strong>，
+          因为状态还在 <code>self.state</code> 里；但换一个实例就什么都不记得，除非你把旧实例的
+          <code>state</code> 传过去。
+        </p>
+        <pre><code>await agent.reply(UserMsg(name="user", content="我叫小明。"))
+msg = await agent.reply(UserMsg(name="user", content="我叫什么？"))
+print(msg.get_text_content())  # 会回答「小明」</code></pre>
+        <p>
+          只想让 Agent「看到」一条消息、但不触发回复，用 <code>observe()</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:382">_agent.py:382</span>。
+          这是多智能体场景里传递上下文的标准做法。
+        </p>
+        <div class="callout">
+          <span class="ct">状态可序列化</span>
+          <p>
+            <code>AgentState</code> 是 Pydantic 模型，可以整体序列化成 JSON。跨进程恢复、会话服务、
+            断点续跑都建立在这个设计上，13 章与 15 章会展开。
+          </p>
+        </div>
+
+        <h2 id="streaming">流式：事件顺序与前端该怎么接</h2>
+        <p>
+          <code>reply()</code> 是「把事件流消费完，只给你最后一条消息」。想在界面上看到
+          「正在思考 → 正在调用工具 → 工具返回 → 继续回答」，要用 <code>reply_stream()</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:289">_agent.py:289</span>。
+        </p>
+        <pre><code>from agentscope.event import EventType
+from agentscope.message import Msg
+
+async for chunk in agent.reply_stream(
+    UserMsg(name="user", content="杭州今天天气怎么样？"),
+    yield_final_msg=True,
+):
+    if isinstance(chunk, Msg):
+        print("\n[final]", chunk.get_text_content())
+        continue
+
+    if chunk.type == EventType.TEXT_BLOCK_DELTA:
+        print(chunk.delta, end="", flush=True)
+    elif chunk.type == EventType.TOOL_CALL_START:
+        print(f"\n[tool] {chunk.tool_call_name}")</code></pre>
+        <p>一次「工具 + 回答」的事件顺序大致是：</p>
+        <pre><code>REPLY_START
+  MODEL_CALL_START
+  TEXT_BLOCK_START / TEXT_BLOCK_DELTA ... / TEXT_BLOCK_END
+  TOOL_CALL_START / TOOL_CALL_DELTA ... / TOOL_CALL_END
+  MODEL_CALL_END
+  TOOL_RESULT_START / TOOL_RESULT_TEXT_DELTA ... / TOOL_RESULT_END
+  MODEL_CALL_START              # 第二轮，模型看到了工具结果
+  TEXT_BLOCK_START / TEXT_BLOCK_DELTA ... / TEXT_BLOCK_END
+  MODEL_CALL_END
+REPLY_END</code></pre>
+        <p>
+          事件类型定义在
+          <span class="src" data-src="src/agentscope/event/_event.py:25">_event.py:25</span>。
+          两个容易忽略的点：
+        </p>
+        <ul>
+          <li>
+            <code>reply_stream()</code> 默认<strong>不</strong>产出最终 <code>Msg</code>；
+            需要它时传 <code>yield_final_msg=True</code>
+            <span class="src" data-src="src/agentscope/agent/_agent.py:298">_agent.py:298</span>。
+          </li>
+          <li>
+            <code>TOOL_CALL_DELTA</code> 是 JSON 参数字符串的碎片，不是可以直接 <code>json.loads</code> 的完整对象；
+            要拿完整参数等 <code>TOOL_CALL_END</code>，或直接用 <code>TOOL_RESULT_*</code>。
+          </li>
+        </ul>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+                <th>默认值 / 注意</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>包装一个函数工具</td>
+                <td><code>FunctionTool(func, is_read_only=True)</code></td>
+                <td>默认 <code>is_read_only=False</code>，会走 ASK</td>
+              </tr>
+              <tr>
+                <td>注册工具</td>
+                <td><code>Toolkit(tools=[...])</code></td>
+                <td>放入 <code>basic</code> 工具组</td>
+              </tr>
+              <tr>
+                <td>同步拿最终消息</td>
+                <td><code>await agent.reply(msg)</code></td>
+                <td>返回 <code>Msg</code></td>
+              </tr>
+              <tr>
+                <td>流式看过程</td>
+                <td><code>agent.reply_stream(msg)</code></td>
+                <td>配合 <code>EventType</code> 分发</td>
+              </tr>
+              <tr>
+                <td>取纯文本</td>
+                <td><code>msg.get_text_content()</code></td>
+                <td>无文本时返回 <code>None</code></td>
+              </tr>
+              <tr>
+                <td>改循环上限</td>
+                <td><code>ReActConfig(max_iters=10)</code></td>
+                <td>默认 50 轮</td>
+              </tr>
+              <tr>
+                <td>只注入不回复</td>
+                <td><code>await agent.observe(msg)</code></td>
+                <td>多智能体传上下文</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">模型不调用工具，而是自己编答案</span>
+          <p>
+            先检查三处：函数有没有类型注解、docstring 是不是 <code>Args:</code> 格式、<code>description</code>
+            有没有说清「什么时候该用它」。再确认模型本身支持工具调用（<code>deepseek-chat</code> 支持）。
+            最后在 <code>system_prompt</code> 里明确要求「需要天气时调用 get_weather」。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">程序卡住不动，<code>reply()</code> 一直不返回</span>
+          <p>
+            大概率是工具权限走了 ASK：框架产出了 <code>REQUIRE_USER_CONFIRM</code> 事件并在等确认。
+            <code>FunctionTool</code> 默认就是 ASK
+            <span class="src" data-src="src/agentscope/tool/_adapters.py:131">_adapters.py:131</span>。
+            只读工具加 <code>is_read_only=True</code>；需要执行副作用的工具，应该显式设计确认流程（08 章），
+            而不是简单改成 BYPASS。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct"><code>finished_reason</code> 是 <code>None</code></span>
+          <p>
+            说明回复被挂起了，通常是等待用户确认或外部执行结果。不是失败，也不是完成；
+            需要把确认结果通过 <code>UserConfirmResultEvent</code> 传回去继续（08 章）。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">同步工具会阻塞事件循环</span>
+          <p>
+            <code>FunctionTool</code> 直接调用函数，只有返回 awaitable 时才 <code>await</code>
+            <span class="src" data-src="src/agentscope/tool/_adapters.py:150">_adapters.py:150</span>。
+            工具里做慢速网络请求时，把它写成 <code>async def</code> 并用异步 HTTP 客户端，否则会卡住整个 Agent。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">想强制工具自动放行，又不想改全局模式</span>
+          <p>
+            <code>FunctionTool</code> 支持 <code>permission=</code> 参数，直接传一个
+            <code>PermissionDecision(behavior=PermissionBehavior.ALLOW, ...)</code>
+            <span class="src" data-src="src/agentscope/tool/_adapters.py:67">_adapters.py:67</span>。
+            比把整个 Agent 切到 BYPASS 安全得多。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li>模型一次返回 3 个工具调用，<code>cur_iter</code> 会增加几次？为什么？</li>
+          <li>如果模型在第 50 轮还在调工具，你会拿到什么？<code>finished_reason</code> 是什么？</li>
+          <li>把 <code>is_read_only=True</code> 去掉后，程序的行为会变成什么样？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>再加一个 <code>get_time(city: str)</code> 工具，返回固定时间，观察模型会不会在同一个问题里连续调用两个工具。</li>
+          <li>把 <code>reply()</code> 改成 <code>reply_stream()</code>，打印完整事件序列，对照本章的顺序图。</li>
+          <li>把 <code>ReActConfig(max_iters=1)</code> 传给 Agent，再用一个需要两次工具调用的问题，观察 <code>exceed_max_iters</code> 的表现。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          你已经看到事件流是 Agent 的「对外语言」。下一章
+          <strong>03 消息与事件</strong> 会把 <code>Msg</code> 的内容块、事件类型、流式增量与前后端契约讲透；
+          03 章尚未发布前，可以先读
+          <a href="01-setup.html">01 环境与依赖</a> 的版本与依赖部分，或回
+          <a href="00-study-map.html">00 学习地图</a> 看后续依赖。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

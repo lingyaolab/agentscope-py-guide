@@ -2,6 +2,18 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.2.0 — 2026-11-06
+
+新增第 02 章「第一个 Agent」，把 01 章的「一次模型调用」推进到完整的 ReAct 循环。
+
+- **工具**：用 `FunctionTool` 包装 `get_weather`，讲清 name / description / input_schema 的自动推导来源。
+- **权限**：说明 `FunctionTool` 默认 ASK，以及 `is_read_only=True` 与 `permission=` 两种放行方式。
+- **循环**：拆解 `_next_action()` 的 Reasoning / Acting / Exit 三种动作，以及 `cur_iter` 的累加时机。
+- **终止**：`completed` / `exceed_max_iters` / `interrupted` / `error` 四种结局，含达到上限后的强制收尾调用。
+- **状态**：`AgentState` 的字段分工与「Agent 无状态」的真实含义。
+- **流式**：`reply_stream()` 的事件顺序与 `yield_final_msg=True` 的用法。
+- **核对**：第 02 章新增 29 条 `file:line` 出处，全部通过脚本校验。
+
 ## v0.1.1 — 2026-11-06
 
 换掉从 Spring AI 站继承的绿色，给 Python 站一套独立配色与图标。
