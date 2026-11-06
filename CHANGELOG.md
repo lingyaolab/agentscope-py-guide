@@ -2,6 +2,19 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.5.0 — 2026-11-06
+
+新增第 05 章「工具系统」，把 02 章的 `FunctionTool` 展开到可自己写工具、接 MCP 的程度。
+
+- **分层**：schema（给模型）、permission（给框架）、call（给代码）三层职责。
+- **两种写法**：`FunctionTool` 的四种返回形态与三个构造参数；继承 `ToolBase` 的完整示例。
+- **schema**：docstring + 类型注解 + Pydantic 三种表达约束的方式。
+- **Toolkit**：`basic` 组、`ToolGroup` 按需激活、`ResetTools` 元工具、运行时 `add_tool` / `remove_tool`。
+- **并发**：按 `is_concurrency_safe` 连续分批，并发批次失败不互相取消，汇总为 `ExceptionGroup`。
+- **错误**：六种失败场景分别转成什么结果，以及为什么「异常文本也是给模型的提示」。
+- **MCP**：stdio / HTTP 两种配置、stateful 与 stateless、`mcp__server__tool` 命名规则、权限与容错。
+- **内置工具**：Bash / 文件 / 任务 / AskUser 的能力与权限特点。
+
 ## v0.4.0 — 2026-11-06
 
 新增第 04 章「模型接入」，并把 01、02 章的示例模型名修正到当前活跃版本。
