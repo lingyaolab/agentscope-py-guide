@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 消息渠道：ChannelBase、ChannelEvent、ChannelGateway、ChannelLifecycleDispatcher、飞书/钉钉/Discord 接入、会话路由与会话划分、自定义渠道、长连接与多副本。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="18 消息渠道：飞书、钉钉、Discord 接入 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="ChannelBase、ChannelEvent、网关与分发器、三个内置平台、会话路由与划分、自定义渠道、长连接与多副本。" />
+    <title>18 消息渠道：飞书、钉钉、Discord 接入 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="18-channel" data-root="..">
+    <main>
+      <article class="article">
+        <h1>18 · 消息渠道</h1>
+        <p class="lede">
+          用户不一定愿意打开你的 Web UI，但一定在飞书、钉钉或 Discord 里。
+          渠道（Channel）把 Agent 接入这些 IM 平台：收消息、回消息、处理工具审批，
+          并决定「哪条消息进哪个 Agent 的哪个会话」。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>说清渠道适配器、网关、分发器三者的分工</li>
+          <li>用 <code>create_app(channels=[...])</code> 启用飞书 / 钉钉 / Discord</li>
+          <li>写出「首条命中即停」的路由规则，并选对 <code>session_scope</code></li>
+          <li>知道多副本时为什么只能有一个进程持有长连接</li>
+        </ul>
+
+        <h2 id="why">先说为什么：把 Agent 放进用户已经在的地方</h2>
+        <p>
+          做一个自己的聊天页面成本不低，而且用户不会为了一个 Agent 专门打开它。
+          渠道把 Agent 直接放进 IM：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>能力</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>收发消息</td><td>用户在平台发消息，Agent 回复到同一个聊天</td></tr>
+              <tr><td>主动推送</td><td>Agent 可以主动向指定聊天 / 用户发消息</td></tr>
+              <tr><td>路由</td><td>不同聊天 / 用户交给不同 Agent 与会话</td></tr>
+              <tr><td>多模态</td><td>图片、文件收发</td></tr>
+              <tr><td>工具审批</td><td>在对话里完成确认，而不是跳回控制台</td></tr>
+              <tr><td>上下文注入</td><td>自动告诉 Agent 所在平台、聊天名、群聊 / 私聊</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="architecture">架构：适配器、网关、分发器</h2>
+        <pre><code>IM 平台（飞书 / 钉钉 / Discord）
+      │  长连接
+      ▼
+ChannelBase 适配器 ── ChannelEvent ──▶ ChannelGateway（无状态编排）
+                                          │
+                                          ├─ 路由 → agent_id / session_id
+                                          ├─ 驱动 ChatService.run
+                                          ├─ 收集事件流
+                                          └─ send_response 回平台
+      ▲
+      │
+ChannelLifecycleDispatcher（把存储里的渠道记录与本机实例对齐）</code></pre>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>组件</th>
+                <th>职责</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>ChannelBase</code><span class="src" data-src="src/agentscope/app/channel/_base.py:303">_base.py:303</span></td>
+                <td>平台翻译层：连接、收消息、发回复；平台差异全在这里</td>
+              </tr>
+              <tr>
+                <td><code>ChannelGateway</code><span class="src" data-src="src/agentscope/app/channel/_gateway.py:46">_gateway.py:46</span></td>
+                <td>无状态编排：路由、驱动运行、处理确认</td>
+              </tr>
+              <tr>
+                <td><code>ChannelLifecycleDispatcher</code><span class="src" data-src="src/agentscope/app/channel/_dispatcher.py:54">_dispatcher.py:54</span></td>
+                <td>把存储里的渠道记录与本机长连接实例保持一致</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          适配器不 import 编排层，只产出规范化的 <code>ChannelEvent</code>。
+          这样新增平台时，不需要碰路由、会话、审批这些逻辑。
+        </p>
+
+        <h2 id="base">ChannelBase：实现什么</h2>
+        <p>
+          一个渠道类要做两件事：<strong>自描述类型</strong>和<strong>实现行为</strong>。
+        </p>
+        <h3>自描述</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>类属性</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>channel_type</code><span class="src" data-src="src/agentscope/app/channel/_base.py:321">_base.py:321</span></td><td>唯一类型标识，如 <code>feishu</code></td></tr>
+              <tr><td><code>display_name</code><span class="src" data-src="src/agentscope/app/channel/_base.py:324">_base.py:324</span></td><td>管理界面显示名</td></tr>
+              <tr><td><code>platform_bot_id_field</code><span class="src" data-src="src/agentscope/app/channel/_base.py:327">_base.py:327</span></td><td>用哪个凭据字段做接入查重</td></tr>
+              <tr><td><code>Credentials</code> / <code>Config</code></td><td>嵌套 Pydantic 模型，框架据此渲染表单、校验输入</td></tr>
+              <tr><td><code>capabilities</code><span class="src" data-src="src/agentscope/app/channel/_base.py:272">_base.py:272</span></td><td>文本 / Markdown / 图片 / 文件 / 交互 / 流式 / 最大长度 / wiki</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>行为</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>方法</th>
+                <th>职责</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>channel_id</code><span class="src" data-src="src/agentscope/app/channel/_base.py:388">_base.py:388</span></td><td>返回实例唯一标识</td></tr>
+              <tr><td><code>start_listening(emit)</code><span class="src" data-src="src/agentscope/app/channel/_base.py:392">_base.py:392</span></td><td>建立长连接，把平台消息规范化成 <code>ChannelEvent</code> 后 <code>emit</code></td></tr>
+              <tr><td><code>send_response(event, events)</code><span class="src" data-src="src/agentscope/app/channel/_base.py:412">_base.py:412</span></td><td>消费一次运行的事件流，累积成回复发回平台</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <code>ChannelEvent</code>
+          <span class="src" data-src="src/agentscope/app/channel/_base.py:57">_base.py:57</span>
+          的关键字段：<code>channel_id</code>、<code>channel_user_id</code>、<code>chat_id</code>、
+          <code>content</code>（与 <code>Msg.content</code> 同构的 TextBlock / DataBlock）、<code>metadata</code>。
+        </p>
+        <p>
+          状态用 <code>ChannelStatus</code> 暴露：<code>stopped</code> / <code>connecting</code> /
+          <code>connected</code> / <code>retrying</code> / <code>failed</code>。
+          <code>GET /channels/{id}/status</code> 读的就是它。
+        </p>
+
+        <h2 id="register">启用渠道</h2>
+        <p>
+          用 <code>create_app</code> 的 <code>channels</code> 参数
+          <span class="src" data-src="src/agentscope/app/_app.py:134">_app.py:134</span>
+          声明本服务<strong>允许接入哪些类型</strong>：
+        </p>
+        <pre><code>from agentscope.app import create_app
+from agentscope.app.channel import (
+    DingTalkChannel,
+    DiscordChannel,
+    FeishuChannel,
+)
+
+app = create_app(
+    storage=storage,
+    message_bus=message_bus,
+    workspace_manager=workspace_manager,
+    channels=[FeishuChannel, DingTalkChannel, DiscordChannel],
+)</code></pre>
+        <p>
+          不传就完全不启用渠道功能。启用后，用户通过 <code>/channels</code> 下的接口创建、配置、启停渠道。
+          前端可以用 <code>GET /channels/types</code> 拿到每种类型的凭据表单 JSON Schema。
+        </p>
+
+        <h2 id="routing">会话路由：交给谁、进哪个会话</h2>
+        <p>
+          路由不是一张预先写好的对照表，而是一组<strong>有顺序的规则</strong>。
+          <code>resolve()</code>
+          <span class="src" data-src="src/agentscope/app/channel/_routing.py:41">_routing.py:41</span>
+          按顺序匹配，首条命中即停。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>match_key</code></td><td><code>chat_id</code>、<code>user_id</code>，或 <code>metadata</code> 里的键（如 <code>chat_type</code>）</td></tr>
+              <tr><td><code>match_value</code></td><td>精确匹配；<code>"*"</code> 表示兜底</td></tr>
+              <tr><td><code>agent_id</code></td><td>命中后交给谁</td></tr>
+              <tr><td><code>session_scope</code></td><td><code>per_chat</code> 或 <code>per_chat_user</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <pre><code>{
+  "bindings": [
+    {
+      "match_key": "chat_id",
+      "match_value": "oc_product_team",
+      "agent_id": "product-expert",
+      "session_scope": "per_chat"
+    },
+    {
+      "match_key": "chat_id",
+      "match_value": "*",
+      "agent_id": "friday",
+      "session_scope": "per_chat"
+    }
+  ]
+}</code></pre>
+        <h3>会话划分</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th><code>session_scope</code></th>
+                <th>含义</th>
+                <th>适用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>per_chat</code></td><td>一个聊天一个会话</td><td>默认；私聊天然一人一会话，群聊整群共享</td></tr>
+              <tr><td><code>per_chat_user</code></td><td>同一聊天里每个用户各自一个会话</td><td>群里多人分别和机器人对话，互不干扰</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          会话 ID 不是存出来的，而是用 <code>(channel_id, agent_id, scope_key)</code> 做 uuid5
+          <strong>确定性推导</strong>。所以每个节点算出的结果一致，创建会话可以幂等
+          <span class="src" data-src="src/agentscope/app/channel/_routing.py:1">_routing.py:1</span>。
+        </p>
+        <div class="callout warn">
+          <span class="ct">路由配置的三条硬校验</span>
+          <p>
+            必须有且仅有一条兜底规则（<code>match_value="*"</code>）；兜底必须在最后；
+            不允许重复的 <code>(match_key, match_value)</code>。否则保存失败。
+          </p>
+        </div>
+
+        <h2 id="feishu">飞书（Lark）</h2>
+        <p>
+          <code>FeishuChannel</code>
+          <span class="src" data-src="src/agentscope/app/channel/_feishu/_channel.py:91">_channel.py:91</span>
+          的 <code>channel_type</code> 是 <code>feishu</code>
+          <span class="src" data-src="src/agentscope/app/channel/_feishu/_channel.py:94">_channel.py:94</span>，
+          走 WebSocket 长连接。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>凭据</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>app_id</code><span class="src" data-src="src/agentscope/app/channel/_feishu/_channel.py:104">_channel.py:104</span></td><td>飞书应用 App ID</td></tr>
+              <tr><td><code>app_secret</code><span class="src" data-src="src/agentscope/app/channel/_feishu/_channel.py:105">_channel.py:105</span></td><td>飞书应用 App Secret</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          飞书侧支持流式卡片、工具确认卡片、表情反馈与知识库工具（<code>ListWikiSpaces</code> 等）。
+          创建机器人、开权限、配事件订阅的步骤以官方接入页为准。
+        </p>
+
+        <h2 id="dingtalk">钉钉</h2>
+        <p>
+          <code>DingTalkChannel</code>
+          <span class="src" data-src="src/agentscope/app/channel/_dingtalk/_channel.py:83">_channel.py:83</span>
+          的 <code>channel_type</code> 是 <code>dingtalk</code>
+          <span class="src" data-src="src/agentscope/app/channel/_dingtalk/_channel.py:86">_channel.py:86</span>，
+          走 Stream 模式长连接。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>凭据 / 配置</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>client_id</code><span class="src" data-src="src/agentscope/app/channel/_dingtalk/_channel.py:95">_channel.py:95</span></td><td>应用 Client ID</td></tr>
+              <tr><td><code>client_secret</code><span class="src" data-src="src/agentscope/app/channel/_dingtalk/_channel.py:99">_channel.py:99</span></td><td>应用 Client Secret</td></tr>
+              <tr><td><code>approval_card_template_id</code><span class="src" data-src="src/agentscope/app/channel/_dingtalk/_channel.py:132">_channel.py:132</span></td><td>工具审批卡片模板</td></tr>
+              <tr><td><code>streaming_card_template_id</code><span class="src" data-src="src/agentscope/app/channel/_dingtalk/_channel.py:140">_channel.py:140</span></td><td>流式卡片模板</td></tr>
+              <tr><td><code>streaming_card_key</code><span class="src" data-src="src/agentscope/app/channel/_dingtalk/_channel.py:147">_channel.py:147</span></td><td>流式卡片字段名</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          钉钉还提供知识库工具（<code>ListWikiSpaces</code> / <code>ListWikiNodes</code> /
+          <code>ReadWikiDocument</code>），Agent 可以直接读组织内的 wiki。
+        </p>
+
+        <h2 id="discord">Discord</h2>
+        <p>
+          <code>DiscordChannel</code>
+          <span class="src" data-src="src/agentscope/app/channel/_discord/_channel.py:43">_channel.py:43</span>
+          的 <code>channel_type</code> 是 <code>discord</code>
+          <span class="src" data-src="src/agentscope/app/channel/_discord/_channel.py:46">_channel.py:46</span>，
+          走 Gateway WebSocket。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>凭据</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>bot_token</code><span class="src" data-src="src/agentscope/app/channel/_discord/_channel.py:55">_channel.py:55</span></td><td>Bot Token</td></tr>
+              <tr><td><code>application_id</code><span class="src" data-src="src/agentscope/app/channel/_discord/_channel.py:59">_channel.py:59</span></td><td>Application ID</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Discord 的 <code>metadata.chat_type</code> 是 <code>guild</code> / <code>dm</code>，
+          路由规则可以据此区分服务器频道与私聊。
+        </p>
+
+        <h2 id="custom">自定义渠道</h2>
+        <p>
+          接内置之外的平台，继承 <code>ChannelBase</code>，实现三个抽象成员：
+        </p>
+        <pre><code>from pydantic import BaseModel, Field
+
+from agentscope.app.channel import ChannelBase
+
+
+class MyChannel(ChannelBase):
+    channel_type = "my_platform"
+    display_name = "My Platform"
+    platform_bot_id_field = "token"
+
+    class Credentials(BaseModel):
+        token: str = Field(
+            title="Bot Token",
+            json_schema_extra={"format": "password"},
+        )
+
+    class Config(BaseModel):
+        only_at_reply: bool = True
+
+    def __init__(self, channel_id, credentials, config) -&gt; None:
+        self._channel_id = channel_id
+        self._token = credentials.token
+        self._config = config
+
+    @property
+    def channel_id(self) -&gt; str:
+        return self._channel_id
+
+    async def start_listening(self, emit) -&gt; None:
+        self._emit = emit
+        ...
+
+    async def send_response(self, event, events) -&gt; None:
+        ...</code></pre>
+        <p>
+          然后把类加进 <code>channels</code>，它就会出现在管理界面的平台列表里。
+        </p>
+        <div class="callout tip">
+          <span class="ct">工具确认要回传定位键</span>
+          <p>
+            渠道收到 <code>RequireUserConfirmEvent</code> 后，把确认结果包成
+            <code>ChannelConfirmationResultEvent</code>，带上
+            <code>chat_id</code>、<code>channel_user_id</code>、<code>tool_call_id</code>。
+            服务端不会信任卡片内容，而是从会话状态里读权威的待确认调用。
+          </p>
+        </div>
+        <p>
+          需要扫码授权的平台，可以实现 <code>credential_binding</code>，让管理界面多出「扫码授权」页签。
+          绑定过程必须无状态：device code、PKCE verifier 这些都放进 <code>provider_state</code> 返回。
+        </p>
+
+        <h2 id="worker">长连接与多副本</h2>
+        <p>
+          渠道靠长连接收消息，所以进程必须一直活着。这带来两个部署约束：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>约束</th>
+                <th>原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>enable_channel_worker</code> 只能有一个进程为 <code>True</code></td>
+                <td>平台只会把某个机器人的事件交给一条连接；每个副本都建连会浪费甚至重复投递</td>
+              </tr>
+              <tr>
+                <td>不适合纯 serverless</td>
+                <td>没有长期存活的进程来维持 WebSocket</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          分布式部署时，每个节点可以各自维持长连接；同一条消息可能被多个节点收到，
+          但同一个会话在同一时刻只允许一个节点收集并发送回复，所以用户不会看到重复回答。
+          前提是 <code>storage</code> 与 <code>message_bus</code> 都指向共享 Redis。
+        </p>
+
+        <h2 id="security">安全与权限</h2>
+        <ul>
+          <li>凭据加密保存，<code>GET /channels/{id}</code> 返回脱敏结果</li>
+          <li>工具审批仍然走 08 章的权限系统，渠道只是把确认 UI 放在 IM 里</li>
+          <li>确认结果只带定位键，不信任卡片回传的内容</li>
+          <li>IM 消息同样可能包含提示注入，权限规则与工具检查不能省</li>
+          <li>二维码 / 扫码授权流程必须无状态，避免多副本丢失中间状态</li>
+        </ul>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>启用内置渠道</td><td><code>channels=[FeishuChannel, DingTalkChannel, DiscordChannel]</code></td></tr>
+              <tr><td>看支持的类型</td><td><code>GET /channels/types</code></td></tr>
+              <tr><td>建渠道</td><td><code>POST /channels/</code></td></tr>
+              <tr><td>启停</td><td><code>POST /channels/{id}/enable</code> / <code>disable</code></td></tr>
+              <tr><td>查连接状态</td><td><code>GET /channels/{id}/status</code></td></tr>
+              <tr><td>配路由</td><td><code>PATCH /channels/{id}</code> 的 <code>routing.bindings</code></td></tr>
+              <tr><td>查已知聊天</td><td><code>GET /channels/{id}/chat_ids</code></td></tr>
+              <tr><td>自定义平台</td><td>继承 <code>ChannelBase</code> 并加入 <code>channels</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">没传 <code>channels</code> 就找接口</span>
+          <p>
+            不传就完全不启用渠道功能，<code>/channels/types</code> 也是空的。
+            先把需要的类列进 <code>channels</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">多个副本都开 <code>enable_channel_worker</code></span>
+          <p>
+            平台消息可能重复投递。只保留一个进程持有长连接，其余通过共享存储 / 总线协作。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">兜底规则没放最后</span>
+          <p>
+            <code>match_value="*"</code> 会吃掉后面所有规则。保存时的校验会拦住，
+            但写配置时就要有这个意识：具体规则在前，兜底在最后。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">以为 <code>match_value</code> 支持前缀 / 正则</span>
+          <p>
+            它是精确匹配，只有 <code>"*"</code> 例外。要按群 / 用户区分子集，
+            用 metadata 里的键（比如 <code>chat_type</code>）。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">改 <code>session_scope</code> 后旧会话没变</span>
+          <p>
+            只会影响之后的消息。已经按旧 scope 建好的会话不会被合并或迁移。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">用 <code>chat_ids</code> 拿平台 ID</span>
+          <p>
+            配路由时不要手抄 <code>chat_id</code>。<code>GET /channels/{id}/chat_ids</code>
+            会列出机器人已知的聊天，直接复制。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li>渠道适配器、网关、分发器分别负责什么？新增平台要改哪一层？</li>
+          <li><code>per_chat</code> 和 <code>per_chat_user</code> 在群聊里的区别是什么？</li>
+          <li>为什么多副本部署时 <code>enable_channel_worker</code> 只能开一个？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>用 <code>create_app(channels=[...])</code> 启用飞书，打开 <code>/channels/types</code> 看凭据 schema。</li>
+          <li>配两条路由：产品群给专属 Agent，其余兜底给通用助手。</li>
+          <li>把群聊规则改成 <code>per_chat_user</code>，用两个不同用户发消息，确认会话被分开。</li>
+          <li>实现一个最小自定义渠道，只打印收到的 <code>ChannelEvent</code>，再回一句固定文本。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          渠道把 Agent 放进了用户的日常工具。下一章 <strong>19 MCP 与技能中心</strong> 讲怎么让用户
+          从中心安装 MCP 服务与技能，并配置自己的凭证。
+          19 章尚未发布前，可以先回 <a href="05-tool.html">05 工具系统</a> 复习 MCP 客户端。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

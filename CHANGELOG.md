@@ -2,6 +2,19 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.18.0 — 2026-11-07
+
+新增第 18 章「消息渠道」，把 Agent 接进 IM。
+
+- **架构**：`ChannelBase` 适配器 / `ChannelGateway` 无状态编排 / `ChannelLifecycleDispatcher` 实例对齐。
+- **基类**：类属性、`Credentials` / `Config`、`start_listening` / `send_response`、`capabilities` 与状态。
+- **启用**：`create_app(channels=[...])`，`/channels/types` 暴露凭据 schema。
+- **路由**：`match_key` / `match_value` / `agent_id` / `session_scope`，首条命中、兜底最后、三条硬校验。
+- **会话划分**：`per_chat` 与 `per_chat_user`，会话 ID 用 uuid5 确定性推导。
+- **三个平台**：飞书（app_id/secret）、钉钉（client_id/secret + 卡片模板）、Discord（bot_token/application_id）。
+- **自定义**：继承 `ChannelBase`、工具确认回传定位键、`credential_binding` 无状态扫码。
+- **部署**：`enable_channel_worker` 单实例、共享 Redis、不适合纯 serverless。
+
 ## v0.17.0 — 2026-11-07
 
 新增第 17 章「Agent Team」，讲服务层的多智能体协作。
