@@ -13,8 +13,8 @@
   --fg-faint: #8b96a5;
   --line: #e3e7ec;
   --line-strong: #cfd6de;
-  --brand: #3f7d20;
-  --brand-soft: #eef7e6;
+  --brand: #6d28d9;
+  --brand-soft: #f3e8ff;
   --ok: #157f3d;
   --ok-soft: #e6f4ea;
   --warn: #9a6700;
@@ -40,8 +40,8 @@ html[data-theme="dark"] {
   --fg-faint: #7d8896;
   --line: #232c37;
   --line-strong: #33404f;
-  --brand: #8bc34a;
-  --brand-soft: #1b2a12;
+  --brand: #a78bfa;
+  --brand-soft: #241a3a;
   --ok: #4ac26b;
   --ok-soft: #12261a;
   --warn: #d9a13b;
