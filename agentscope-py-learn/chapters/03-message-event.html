@@ -1,0 +1,724 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 消息与事件：Msg 的字段与六种内容块、AgentEvent 全景、append_event 的事件映射、SSE 帧格式与前后端契约。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="03 消息与事件：Message、流式事件与前后端契约 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="Msg 的字段与六种内容块、AgentEvent 全景、append_event 的事件映射、SSE 帧格式与前后端契约。" />
+    <title>03 消息与事件：Message、流式事件与前后端契约 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="03-message-event" data-root="..">
+    <main>
+      <article class="article">
+        <h1>03 · 消息与事件</h1>
+        <p class="lede">
+          02 章你看到事件流是 Agent 的「对外语言」，但只是打印了一下 <code>delta</code>。这一章把它拆开：
+          <strong>消息（Msg）是结果，事件（AgentEvent）是过程</strong>。理解这两层，你才能自己写前端、做持久化、
+          甚至把服务端换成任何语言实现。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>说清 <code>Msg</code> 的三个必填字段与六种内容块，知道哪种角色允许哪种块</li>
+          <li>看懂 <code>EventType</code> 的全景，并能把一条事件流按生命周期分组</li>
+          <li>用 <code>append_event()</code> 的规则在前端重建一条完整消息，理解 <code>reply_id</code> / <code>block_id</code> 为什么必须对齐</li>
+          <li>写出一个能消费 SSE 帧的最小客户端</li>
+        </ul>
+
+        <h2 id="why">先说为什么：消息是「结果」，事件是「过程」</h2>
+        <p>
+          如果只关心最终答案，一个 <code>Msg</code> 就够了：谁说的、说了什么、什么时候结束。但只要你想做打字机效果、
+          展示工具调用过程、支持断线重放、或者把一次回复存进数据库，就需要<strong>过程</strong>。
+        </p>
+        <div class="stack">
+          <div class="layer accent">
+            <span class="lt">AgentEvent（过程）</span>
+            <div class="ld">
+              细粒度、只增不改的增量：一个 token、一次工具调用开始、一条工具结果。
+              适合实时传输，不适合直接展示给用户。
+            </div>
+          </div>
+          <div class="layer in2">
+            <span class="lt">Msg（结果）</span>
+            <div class="ld">
+              结构化、可持久化的完整消息：内容块列表 + 结束原因 + token 用量。
+              由事件流<strong>应用</strong>出来，也是下一次模型调用的输入。
+            </div>
+          </div>
+          <div class="layer in3">
+            <span class="lt">两者的桥梁</span>
+            <div class="ld">
+              <code>Msg.append_event(event)</code>：把一条事件应用到消息上。服务端持久化用它，前端重建也用它。
+            </div>
+          </div>
+        </div>
+        <p>
+          关键点：<strong>事件不是消息的「另一种表示」，而是消息的「施工日志」</strong>。
+          同样是 <code>TEXT_BLOCK_DELTA</code>，来了 50 条，最终只合并成一个 <code>TextBlock</code>。
+        </p>
+
+        <h2 id="msg">Msg 的结构：三个必填字段 + 一组控制字段</h2>
+        <p>
+          <code>Msg</code> 是所有消息的基类
+          <span class="src" data-src="src/agentscope/message/_base.py:70">_base.py:70</span>，
+          必填字段只有三个：<code>name</code>、<code>content</code>、<code>role</code>。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>类型</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>name</code></td>
+                <td><code>str</code></td>
+                <td>发送者标识，例如 <code>"user"</code> 或 Agent 的名字</td>
+              </tr>
+              <tr>
+                <td><code>content</code></td>
+                <td><code>list[ContentBlock]</code></td>
+                <td>内容块列表，不是字符串</td>
+              </tr>
+              <tr>
+                <td><code>role</code></td>
+                <td><code>"user" | "assistant" | "system"</code></td>
+                <td>决定这次消息在模型侧的角色</td>
+              </tr>
+              <tr>
+                <td><code>id</code></td>
+                <td><code>str</code></td>
+                <td>自动生成；一次 reply 里它同时是 <code>reply_id</code></td>
+              </tr>
+              <tr>
+                <td><code>metadata</code></td>
+                <td><code>dict</code></td>
+                <td>业务自定义字段，不参与模型输入</td>
+              </tr>
+              <tr>
+                <td><code>created_at</code> / <code>finished_at</code></td>
+                <td><code>str</code></td>
+                <td>ISO 8601 时间戳</td>
+              </tr>
+              <tr>
+                <td><code>usage</code></td>
+                <td><code>Usage | None</code></td>
+                <td>累计 token 用量</td>
+              </tr>
+              <tr>
+                <td><code>finished_reason</code></td>
+                <td><code>ReplyFinishedReason | None</code></td>
+                <td><code>completed</code> / <code>exceed_max_iters</code> / <code>interrupted</code> / <code>error</code></td>
+              </tr>
+              <tr>
+                <td><code>structured_output</code></td>
+                <td><code>dict | None</code></td>
+                <td>结构化输出结果</td>
+              </tr>
+              <tr>
+                <td><code>error</code></td>
+                <td><code>ErrorInfo | None</code></td>
+                <td>仅当结束原因是 <code>error</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          三个便捷构造器负责补默认值：<code>UserMsg()</code>
+          <span class="src" data-src="src/agentscope/message/_base.py:569">_base.py:569</span>、
+          <code>AssistantMsg()</code>
+          <span class="src" data-src="src/agentscope/message/_base.py:622">_base.py:622</span>、
+          <code>SystemMsg()</code>
+          <span class="src" data-src="src/agentscope/message/_base.py:680">_base.py:680</span>。
+          它们会把字符串自动包成 <code>TextBlock</code>。
+        </p>
+        <p>角色不同，允许的内容块也不同，这是 <code>Msg</code> 构造时的硬校验：</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>role</th>
+                <th>允许的块</th>
+                <th>校验位置</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>user</code></td>
+                <td><code>TextBlock</code>、<code>DataBlock</code>（文字 + 图片/音频）</td>
+                <td><span class="src" data-src="src/agentscope/message/_base.py:32">_base.py:32</span></td>
+              </tr>
+              <tr>
+                <td><code>system</code></td>
+                <td>只允许 <code>TextBlock</code></td>
+                <td><span class="src" data-src="src/agentscope/message/_base.py:47">_base.py:47</span></td>
+              </tr>
+              <tr>
+                <td><code>assistant</code></td>
+                <td>任意内容块（文本、思考、工具调用、工具结果）</td>
+                <td>不额外限制</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>三个常用读取方法</h3>
+        <pre><code>msg.get_text_content()          # 拼接所有 TextBlock，没有则返回 None
+msg.get_content_blocks("text")  # 按类型过滤，返回对应子类
+msg.has_content_blocks("tool_call")  # 是否包含某类块</code></pre>
+        <p>
+          它们分别定义在
+          <span class="src" data-src="src/agentscope/message/_base.py:155">_base.py:155</span>、
+          <span class="src" data-src="src/agentscope/message/_base.py:161">_base.py:161</span>、
+          <span class="src" data-src="src/agentscope/message/_base.py:131">_base.py:131</span>。
+        </p>
+
+        <h2 id="blocks">六种内容块：消息到底能装什么</h2>
+        <p>
+          <code>ContentBlock</code> 是一个联合类型
+          <span class="src" data-src="src/agentscope/message/_block.py:219">_block.py:219</span>，
+          共六种。每种都有 <code>type</code>、<code>id</code>、<code>created_at</code>、<code>finished_at</code>，
+          区别在业务字段。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>块</th>
+                <th><code>type</code></th>
+                <th>关键字段</th>
+                <th>什么时候出现</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>TextBlock</code><span class="src" data-src="src/agentscope/message/_block.py:11">_block.py:11</span></td>
+                <td><code>text</code></td>
+                <td><code>text</code></td>
+                <td>模型输出的正文、用户输入的文本</td>
+              </tr>
+              <tr>
+                <td><code>ThinkingBlock</code><span class="src" data-src="src/agentscope/message/_block.py:26">_block.py:26</span></td>
+                <td><code>thinking</code></td>
+                <td><code>thinking</code></td>
+                <td>推理模型的思考过程；也承载 Anthropic 的加密思考</td>
+              </tr>
+              <tr>
+                <td><code>HintBlock</code><span class="src" data-src="src/agentscope/message/_block.py:101">_block.py:101</span></td>
+                <td><code>hint</code></td>
+                <td><code>hint</code>、<code>source</code></td>
+                <td>框架注入的提示（压缩提醒、轮次超限提醒）；发给模型时会被转成 user 消息</td>
+              </tr>
+              <tr>
+                <td><code>ToolCallBlock</code><span class="src" data-src="src/agentscope/message/_block.py:138">_block.py:138</span></td>
+                <td><code>tool_call</code></td>
+                <td><code>name</code>、<code>input</code>（JSON 字符串）、<code>state</code></td>
+                <td>模型请求调用工具</td>
+              </tr>
+              <tr>
+                <td><code>ToolResultBlock</code><span class="src" data-src="src/agentscope/message/_block.py:195">_block.py:195</span></td>
+                <td><code>tool_result</code></td>
+                <td><code>output</code>、<code>state</code>、<code>metadata</code></td>
+                <td>工具执行完，结果回填</td>
+              </tr>
+              <tr>
+                <td><code>DataBlock</code><span class="src" data-src="src/agentscope/message/_block.py:83">_block.py:83</span></td>
+                <td><code>data</code></td>
+                <td><code>source</code>（base64 或 URL）、<code>name</code></td>
+                <td>图片、音频、视频、PDF 等二进制内容</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>两个状态枚举值得单独记</h3>
+        <p>
+          <code>ToolCallBlock.state</code> 有五个值
+          <span class="src" data-src="src/agentscope/message/_block.py:128">_block.py:128</span>：
+        </p>
+        <pre><code>pending → asking → allowed → finished
+              └→ finished（用户拒绝）
+pending → allowed（权限直接放行）
+pending → submitted（外部执行工具）→ finished</code></pre>
+        <p>
+          <code>ToolResultBlock.state</code> 有五个值
+          <span class="src" data-src="src/agentscope/message/_block.py:185">_block.py:185</span>：
+          <code>success</code>、<code>error</code>、<code>interrupted</code>、<code>denied</code>、<code>running</code>。
+          前端展示工具卡片时，这两个状态就够了，不需要自己再发明一套。
+        </p>
+        <div class="callout tip">
+          <span class="ct">为什么 <code>ToolCallBlock.input</code> 是字符串</span>
+          <p>
+            流式传输时，模型返回的工具参数是一段段 JSON 片段，框架按顺序拼起来
+            <span class="src" data-src="src/agentscope/message/_base.py:406">_base.py:406</span>。
+            在 <code>TOOL_CALL_END</code> 之前，它可能不是一个合法的 JSON 字符串，别急着 <code>json.loads</code>。
+          </p>
+        </div>
+
+        <h2 id="events">事件全景：三类生命周期与四条流</h2>
+        <p>
+          所有事件的类型都在 <code>EventType</code>
+          <span class="src" data-src="src/agentscope/event/_event.py:25">_event.py:25</span>，
+          取值是**大写下划线字符串**，不是 Python 类名。按用途可以分成五组：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>分组</th>
+                <th>事件</th>
+                <th>用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>回复生命周期</td>
+                <td><code>REPLY_START</code>、<code>REPLY_END</code></td>
+                <td>一次 reply 的开始与结束；结束事件带 <code>finished_reason</code></td>
+              </tr>
+              <tr>
+                <td>模型调用</td>
+                <td><code>MODEL_CALL_START</code>、<code>MODEL_CALL_END</code></td>
+                <td>每次调用模型的边界；结束事件带 token 用量</td>
+              </tr>
+              <tr>
+                <td>内容块流</td>
+                <td><code>TEXT_BLOCK_*</code>、<code>THINKING_BLOCK_*</code>、<code>DATA_BLOCK_*</code>、<code>HINT_BLOCK</code></td>
+                <td>正文、思考、多模态内容的增量</td>
+              </tr>
+              <tr>
+                <td>工具流</td>
+                <td><code>TOOL_CALL_*</code>、<code>TOOL_RESULT_*</code></td>
+                <td>工具调用参数与执行结果</td>
+              </tr>
+              <tr>
+                <td>交互与扩展</td>
+                <td><code>REQUIRE_USER_CONFIRM</code>、<code>REQUIRE_EXTERNAL_EXECUTION</code>、<code>USER_CONFIRM_RESULT</code>、<code>USER_INTERRUPT</code>、<code>EXTERNAL_EXECUTION_RESULT</code>、<code>CUSTOM</code></td>
+                <td>人机确认、外部执行、前端通知</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          所有事件共享一个基类
+          <span class="src" data-src="src/agentscope/event/_event.py:69">_event.py:69</span>：
+          <code>id</code>、<code>created_at</code>、<code>metadata</code>、<code>type</code>；
+          绝大多数还带 <code>reply_id</code>，块级事件再带 <code>block_id</code> 或 <code>tool_call_id</code>。
+        </p>
+        <p>
+          官方把全部事件收成一个联合类型 <code>AgentEvent</code>
+          <span class="src" data-src="src/agentscope/event/_event.py:570">_event.py:570</span>。
+          SDK 的 <code>reply_stream()</code> 产出的就是它的实例。
+        </p>
+        <div class="callout">
+          <span class="ct">事件是「只增不改」的</span>
+          <p>
+            同一条消息的文本不会被某条事件「覆盖」成新状态，而是由 <code>delta</code> 累加出来
+            （<code>END</code> 事件可选带最终全文做校正）。这让你可以安全地回放、续传、并行处理。
+          </p>
+        </div>
+
+        <h2 id="apply">事件怎么拼回消息：append_event 的映射规则</h2>
+        <p>
+          这是本章最重要的一段。<code>Msg.append_event()</code>
+          <span class="src" data-src="src/agentscope/message/_base.py:243">_base.py:243</span>
+          定义了「事件 → 消息」的全部规则。它只做三件事：改 <code>content</code>、写 <code>finished_at</code>、
+          累加 <code>usage</code>。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>事件</th>
+                <th>对消息做什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>REPLY_END</code></td>
+                <td>写 <code>finished_at</code>、<code>finished_reason</code>、<code>error</code></td>
+              </tr>
+              <tr>
+                <td><code>MODEL_CALL_END</code></td>
+                <td>把 input / output / cache token 累加到 <code>usage</code></td>
+              </tr>
+              <tr>
+                <td><code>TEXT_BLOCK_START</code></td>
+                <td>追加一个空的 <code>TextBlock(id=block_id, text="")</code></td>
+              </tr>
+              <tr>
+                <td><code>TEXT_BLOCK_DELTA</code></td>
+                <td><code>block.text += delta</code></td>
+              </tr>
+              <tr>
+                <td><code>TEXT_BLOCK_END</code></td>
+                <td>可选地用 <code>event.text</code> 校正全文，写 <code>finished_at</code></td>
+              </tr>
+              <tr>
+                <td><code>THINKING_BLOCK_*</code></td>
+                <td>与文本同构，字段是 <code>thinking</code></td>
+              </tr>
+              <tr>
+                <td><code>DATA_BLOCK_*</code></td>
+                <td>base64 分片先解码再拼接，避免 padding 破坏字节流；URL 直接替换 source</td>
+              </tr>
+              <tr>
+                <td><code>HINT_BLOCK</code></td>
+                <td>一次性追加完整 <code>HintBlock</code></td>
+              </tr>
+              <tr>
+                <td><code>TOOL_CALL_START</code></td>
+                <td>追加 <code>ToolCallBlock(input="")</code></td>
+              </tr>
+              <tr>
+                <td><code>TOOL_CALL_DELTA</code></td>
+                <td><code>block.input += delta</code>（JSON 字符串片段）</td>
+              </tr>
+              <tr>
+                <td><code>TOOL_RESULT_START</code></td>
+                <td>追加 <code>ToolResultBlock(output=[], state=running)</code></td>
+              </tr>
+              <tr>
+                <td><code>TOOL_RESULT_TEXT_DELTA</code></td>
+                <td>追加或合并 <code>TextBlock</code></td>
+              </tr>
+              <tr>
+                <td><code>TOOL_RESULT_END</code></td>
+                <td>写 <code>state</code> / <code>metadata</code>，并把配对的 <code>ToolCallBlock</code> 置为 <code>finished</code></td>
+              </tr>
+              <tr>
+                <td><code>REQUIRE_USER_CONFIRM</code></td>
+                <td>把对应 tool call 置为 <code>asking</code>，记录建议规则</td>
+              </tr>
+              <tr>
+                <td><code>USER_CONFIRM_RESULT</code></td>
+                <td><code>asking</code> → <code>allowed</code> 或 <code>finished</code></td>
+              </tr>
+              <tr>
+                <td><code>REQUIRE_EXTERNAL_EXECUTION</code></td>
+                <td>置为 <code>submitted</code></td>
+              </tr>
+              <tr>
+                <td><code>EXTERNAL_EXECUTION_RESULT</code></td>
+                <td>追加外部执行返回的 <code>ToolResultBlock</code></td>
+              </tr>
+              <tr>
+                <td><code>CUSTOM</code></td>
+                <td>直接跳过，不影响消息内容</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>两条「静默丢弃」规则，前端必须照做</h3>
+        <pre><code>if event.reply_id != msg.id:        # 不是这条回复的事件
+    return                          # 跳过并告警
+
+if 目标 block 找不到:                # 例如 delta 先于 start 到达
+    return                          # 跳过并告警</code></pre>
+        <p>
+          <code>append_event</code> 对这两种情况都只记一条 warning，然后继续
+          <span class="src" data-src="src/agentscope/message/_base.py:267">_base.py:267</span>。
+          这意味着：<strong>客户端 reducer 必须用 <code>reply_id</code> 隔离不同回复，用
+          <code>block_id</code> / <code>tool_call_id</code> 定位块</strong>，不能只按到达顺序盲拼。
+        </p>
+        <div class="callout tip">
+          <span class="ct">自己验证一遍</span>
+          <p>
+            抓一组真实事件，建一个空的 <code>AssistantMsg(id=reply_id, name="Friday", content=[])</code>，
+            逐条 <code>append_event()</code>，最后和 <code>agent.reply()</code> 的返回值比较
+            <code>content</code>：两者应该一致。这就是服务端持久化时做的事。
+          </p>
+        </div>
+
+        <h2 id="batching">块级事件的三段式：start / delta / end</h2>
+        <p>
+          除了 <code>HINT_BLOCK</code> 这种一次性事件，所有内容块都遵循同一个三段式：
+        </p>
+        <pre><code>XXX_START  →  带 block_id，创建空块
+XXX_DELTA  →  带 block_id，增量累加（0..N 条）
+XXX_END    →  带 block_id，收尾（可选带最终全文）</code></pre>
+        <p>这对前端的意义是：你可以用「块」为单位渲染，而不是用「消息」为单位。</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>流</th>
+                <th><code>START</code> 之后就能渲染吗</th>
+                <th><code>END</code> 才拿得到的东西</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>text</td>
+                <td>可以，占位空文本</td>
+                <td>最终全文（如有校正）、<code>finished_at</code></td>
+              </tr>
+              <tr>
+                <td>thinking</td>
+                <td>可以，通常折叠显示</td>
+                <td><code>finished_at</code></td>
+              </tr>
+              <tr>
+                <td>tool call</td>
+                <td>可以显示「正在调用 X」</td>
+                <td>完整 JSON 参数（<code>input</code> 拼完）</td>
+              </tr>
+              <tr>
+                <td>tool result</td>
+                <td>可以显示进度</td>
+                <td><code>state</code>、<code>metadata</code>、配对的 tool call 状态</td>
+              </tr>
+              <tr>
+                <td>data</td>
+                <td>不建议，base64 可能不完整</td>
+                <td>完整图片/音频</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct">别在 <code>DELTA</code> 上做重活</span>
+          <p>
+            文本 <code>delta</code> 可能非常碎。前端如果每条都触发整棵组件树重渲染，长回答会明显卡顿。
+            正确做法是累积到字符串、按帧（<code>requestAnimationFrame</code>）刷新。
+          </p>
+        </div>
+
+        <h2 id="sse">前后端契约：SSE 帧、reply_id 与断线重放</h2>
+        <p>
+          SDK 的 <code>reply_stream()</code> 给你的是 Python 对象。一旦部署成 Agent Service，事件就会变成
+          <strong>SSE</strong>。服务端在
+          <span class="src" data-src="src/agentscope/app/_router/_session.py:961">_session.py:961</span>
+          处的实现很直接：
+        </p>
+        <pre><code>data: {"type":"TEXT_BLOCK_DELTA","reply_id":"...","block_id":"...","delta":"你","id":"...","created_at":"...","metadata":{}}
+
+data: {"type":"TEXT_BLOCK_DELTA","reply_id":"...","block_id":"...","delta":"好",...}
+
+:   ← 每 30 秒一条心跳注释帧</code></pre>
+        <p>契约可以总结成六条：</p>
+        <ol>
+          <li>
+            每个帧都是 <code>data: &lt;json&gt;\n\n</code>，<strong>没有</strong> <code>event:</code> 字段；
+            事件类型在 JSON 的 <code>type</code> 里
+            <span class="src" data-src="src/agentscope/app/_router/_session.py:960">_session.py:960</span>。
+          </li>
+          <li>
+            JSON 来自 <code>event.model_dump(mode="json")</code>
+            <span class="src" data-src="src/agentscope/app/_service/_chat.py:483">_chat.py:483</span>，
+            所以枚举已经是字符串，可以直接 <code>JSON.parse</code>。
+          </li>
+          <li>
+            心跳是 <code>:\n\n</code>，间隔 30 秒
+            <span class="src" data-src="src/agentscope/app/_router/_session.py:750">_session.py:750</span>，
+            用于穿过反向代理，不携带数据。
+          </li>
+          <li>
+            服务端会先重放当前 run 的缓冲事件，再转入实时流；客户端要按 <code>reply_id</code> 去重，
+            不能假设同一条事件只来一次
+            <span class="src" data-src="src/agentscope/app/_router/_session.py:829">_session.py:829</span>。
+          </li>
+          <li>
+            断线重连可以带 <code>?after=&lt;cursor&gt;</code> 从游标之后重放
+            <span class="src" data-src="src/agentscope/app/_router/_session.py:818">_session.py:818</span>。
+          </li>
+          <li>
+            连接保持打开，同一会话后续的 run 会复用同一条连接
+            <span class="src" data-src="src/agentscope/app/_router/_session.py:833">_session.py:833</span>。
+          </li>
+        </ol>
+        <h3>一个最小客户端</h3>
+        <pre><code>import json
+
+import httpx
+
+
+async def consume(url: str, headers: dict) -&gt; None:
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream("GET", url, headers=headers) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue          # 空行、心跳注释都跳过
+                event = json.loads(line[6:])
+                handle(event)
+
+
+def handle(event: dict) -&gt; None:
+    match event["type"]:
+        case "TEXT_BLOCK_DELTA":
+            print(event["delta"], end="", flush=True)
+        case "TOOL_CALL_START":
+            print(f"\n[tool] {event['tool_call_name']}")
+        case "REPLY_END":
+            print(f"\n[done] {event['finished_reason']}")</code></pre>
+        <div class="callout">
+          <span class="ct">SDK 层可以不用 SSE</span>
+          <p>
+            本章的 SSE 契约属于服务层（15、16 章）。自己写脚本时直接用
+            <code>async for event in agent.reply_stream(...)</code> 就够了，不需要经过 HTTP。
+            但两层的<strong>事件模型是同一套</strong>，所以这里学一次，两边都能用。
+          </p>
+        </div>
+
+        <h2 id="serialize">序列化：model_dump 与持久化</h2>
+        <p>
+          <code>Msg</code> 和事件都是 Pydantic 模型，序列化只有两个常用入口：
+        </p>
+        <pre><code>msg.model_dump(mode="json")      # → dict，适合塞进 JSON 列
+msg.model_dump_json()            # → str，适合直接写文件 / 发 HTTP
+msg.model_validate(data)         # 反序列化
+event.model_dump(mode="json")    # 事件同理</code></pre>
+        <p>
+          两个容易踩的点：
+        </p>
+        <ul>
+          <li>
+            <strong>一定要用 <code>mode="json"</code></strong>。<code>model_dump()</code> 默认会留下
+            <code>AnyUrl</code>、<code>SecretStr</code> 这类 Python 对象，不能直接 <code>json.dumps</code>。
+          </li>
+          <li>
+            <strong><code>DataBlock</code> 的 base64 很大</strong>。一条带图片的消息可能几 MB，
+            落库前想清楚是存 base64、存对象存储 URL，还是只存引用。
+          </li>
+        </ul>
+        <p>
+          持久化时通常保存两份东西：<strong>事件日志</strong>用于重放，<strong>最终 <code>Msg</code></strong>
+          用于下一次模型调用和列表展示。服务层用 <code>append_event</code> 在内存里同时维护这两份，
+          再做定期检查点
+          <span class="src" data-src="src/agentscope/app/_service/_chat.py:479">_chat.py:479</span>。
+        </p>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>取纯文本</td>
+                <td><code>msg.get_text_content()</code></td>
+              </tr>
+              <tr>
+                <td>取所有工具调用</td>
+                <td><code>msg.get_content_blocks("tool_call")</code></td>
+              </tr>
+              <tr>
+                <td>判断有没有工具调用</td>
+                <td><code>msg.has_content_blocks("tool_call")</code></td>
+              </tr>
+              <tr>
+                <td>把事件应用到消息</td>
+                <td><code>msg.append_event(event)</code></td>
+              </tr>
+              <tr>
+                <td>序列化消息</td>
+                <td><code>msg.model_dump(mode="json")</code></td>
+              </tr>
+              <tr>
+                <td>客户端拼文本</td>
+                <td><code>TEXT_BLOCK_START</code> 建块，<code>TEXT_BLOCK_DELTA</code> 累加</td>
+              </tr>
+              <tr>
+                <td>客户端拿完整工具参数</td>
+                <td>等 <code>TOOL_CALL_END</code>，或读配对的 <code>tool_result</code></td>
+              </tr>
+              <tr>
+                <td>SSE 帧格式</td>
+                <td><code>data: &lt;json&gt;\n\n</code>，心跳 <code>:\n\n</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">把 <code>event.type</code> 和小写字符串比较</span>
+          <p>
+            事件类型的值是 <code>"TEXT_BLOCK_DELTA"</code>，不是 <code>"text_block_delta"</code>。
+            Python 里用 <code>EventType.TEXT_BLOCK_DELTA</code> 比较最稳；前端里注意大小写。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">收到的 <code>delta</code> 拼不出完整文本</span>
+          <p>
+            先检查是不是把不同 <code>block_id</code> 的 delta 拼到了一起，或者把 <code>tool_result</code>
+            的文本混进了正文。文本和工具结果是两条独立的流。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">重连后出现重复内容</span>
+          <p>
+            服务端会先重放缓冲事件再转实时
+            <span class="src" data-src="src/agentscope/app/_router/_session.py:829">_session.py:829</span>，
+            同一条事件可能被投递两次。按事件 <code>id</code> 或 <code>reply_id + block_id + 序号</code> 去重，
+            不要盲目追加。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct"><code>TEXT_BLOCK_END</code> 可能带全文</span>
+          <p>
+            某些模型实现会在结束事件里给出完整文本。如果最终文本对不上，优先相信
+            <code>END</code> 的 <code>text</code>，它是有意用来校正流式拼接误差的。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct"><code>thinking</code> 块不一定可展示</span>
+          <p>
+            推理模型的思考内容可能被加密（Anthropic 的 redacted thinking 就是 <code>thinking=""</code>
+            + 额外字段）。前端按 <code>type=="thinking"</code> 过滤时会同时拿到可见和加密块，
+            展示前先判断 <code>thinking</code> 是否为空。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li>一条 <code>Msg</code> 里同时有 <code>TextBlock</code> 和 <code>ToolResultBlock</code>，<code>get_text_content()</code> 会返回什么？</li>
+          <li>客户端在 <code>TEXT_BLOCK_START</code> 之前收到 <code>TEXT_BLOCK_DELTA</code>，应该怎么处理？</li>
+          <li>为什么服务端保存事件日志的同时，还要保存最终 <code>Msg</code>？只留一个行不行？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>跑一次带工具调用的 <code>reply_stream()</code>，把每条事件的 <code>type</code>、<code>reply_id</code>、<code>block_id</code> 打印出来，画成时间线。</li>
+          <li>写一个 20 行的 reducer：只处理 <code>REPLY_END</code>、<code>TEXT_BLOCK_START/DELTA</code>，把流式文本拼成最终字符串。</li>
+          <li>把 <code>msg.model_dump(mode="json")</code> 的结果写到文件，再用 <code>Msg.model_validate</code> 读回来，确认内容块没有丢失。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          消息与事件是后面所有章节的基础：04 章的模型实现要产出这些事件，05 章的工具要写这些块，
+          08 章的人机交互就是一组 <code>REQUIRE_*</code> / <code>*_RESULT</code> 事件。
+          下一章 <strong>04 模型接入</strong> 尚未发布前，可以先回
+          <a href="02-first-agent.html">02 第一个 Agent</a> 把事件顺序再对一遍。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
