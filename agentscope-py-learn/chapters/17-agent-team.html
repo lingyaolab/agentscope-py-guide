@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 Agent Team：Leader 与 Worker、TeamCreate/AgentCreate/TeamSay/TeamDelete/AgentInvite、SubAgentTemplate、消息总线与收件箱、HITL 路由与生命周期。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="17 Agent Team：Leader 派生并协调 Worker · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="Leader 与 Worker、五个内置 team 工具、SubAgentTemplate、消息总线与收件箱、HITL 路由与生命周期。" />
+    <title>17 Agent Team：Leader 派生并协调 Worker · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="17-agent-team" data-root="..">
+    <main>
+      <article class="article">
+        <h1>17 · Agent Team</h1>
+        <p class="lede">
+          09 章的 <code>TeamPipeline</code> 是 SDK 内的固定编排：队长调 <code>TeamAssign</code>，
+          成员在自己的上下文里跑。服务层的 Agent Team 不一样——每个 Worker 是<strong>一个完整会话</strong>，
+          有自己的状态、工作区绑定和事件流，可以分布在不同进程。这一章讲它怎么协作。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>说清 Leader、Worker、Team、Session 四者的关系</li>
+          <li>知道五个内置 team 工具分别由谁调用、做什么</li>
+          <li>用 <code>SubAgentTemplate</code> 给不同角色设置不同权限</li>
+          <li>解释 <code>TeamSay</code> 为什么不是「直接调用」，而是「投递 + 唤醒」</li>
+        </ul>
+
+        <h2 id="why">先说为什么：服务层还要一套 Team</h2>
+        <p>
+          SDK 的 <code>TeamPipeline</code> 适合「一个进程里、固定流程」的协作。
+          服务层的团队要解决另外几个问题：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>问题</th>
+                <th>服务层 Team 的答案</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Worker 要能独立观察</td>
+                <td>每个 Worker 是一个独立 Session，有自己的 SSE 流</td>
+              </tr>
+              <tr>
+                <td>Worker 要能并行、分布</td>
+                <td>通过消息总线投递，跨进程 / 跨节点</td>
+              </tr>
+              <tr>
+                <td>Worker 要能被单独中断 / 恢复</td>
+                <td>复用 13、16 章的会话状态与 HITL</td>
+              </tr>
+              <tr>
+                <td>团队要能持久化</td>
+                <td><code>TeamRecord</code> 存成员关系</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          所以服务层 Team 不是「另一套编排框架」，而是<strong>四个内置工具 + 会话 + 消息总线</strong>。
+          没有新的运行时。
+        </p>
+
+        <h2 id="concepts">Leader / Worker / Session / Team</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>概念</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Team</strong></td>
+                <td>一个用户拥有的一组持久化成员，<code>TeamRecord</code> 存名称、描述与成员列表</td>
+              </tr>
+              <tr>
+                <td><strong>Leader</strong></td>
+                <td>创建团队的会话。只有它能加 / 删成员或解散团队</td>
+              </tr>
+              <tr>
+                <td><strong>Worker</strong></td>
+                <td>被派生出的会话，跑自己的 ReAct 循环，继承 Leader 的聊天模型与工作区上下文</td>
+              </tr>
+              <tr>
+                <td><strong>Team Message</strong></td>
+                <td>通过消息总线在成员间路由，以 <code>HintBlock</code> 投递，外层包 <code>&lt;team-message from="…"&gt;</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          关键点：Worker 不是 Leader 协程里的子任务，而是<strong>同一服务里并发运行的另一个会话</strong>。
+          Leader 通过读 Worker 的流、或等 Worker 用 <code>TeamSay</code> 回报来观察进展。
+        </p>
+
+        <h2 id="tools">五个内置工具</h2>
+        <p>Leader 会话自动获得这些工具；Worker 只看到 <code>TeamSay</code>。</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>工具</th>
+                <th>谁用</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>TeamCreate</code><span class="src" data-src="src/agentscope/app/_tool/_team_create.py:30">_team_create.py:30</span></td>
+                <td>Leader</td>
+                <td>以当前会话为根创建团队，并成为 leader</td>
+              </tr>
+              <tr>
+                <td><code>AgentCreate</code><span class="src" data-src="src/agentscope/app/_tool/_agent_create.py:146">_agent_create.py:146</span></td>
+                <td>Leader</td>
+                <td>派生一个 Worker，给名称、角色、首任务；创建后立即执行</td>
+              </tr>
+              <tr>
+                <td><code>AgentInvite</code><span class="src" data-src="src/agentscope/app/_tool/_agent_invite.py:141">_agent_invite.py:141</span></td>
+                <td>Leader</td>
+                <td>邀请一个已有 Agent 加入，为它新建会话</td>
+              </tr>
+              <tr>
+                <td><code>TeamSay</code><span class="src" data-src="src/agentscope/app/_tool/_team_say.py:78">_team_say.py:78</span></td>
+                <td>Leader + Worker</td>
+                <td>向指定成员或广播消息</td>
+              </tr>
+              <tr>
+                <td><code>TeamDelete</code><span class="src" data-src="src/agentscope/app/_tool/_team_delete.py:12">_team_delete.py:12</span></td>
+                <td>Leader</td>
+                <td>解散团队并清理成员会话</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Team 工具都继承同一个基类
+          <span class="src" data-src="src/agentscope/app/_tool/_team_tool_base.py:22">_team_tool_base.py:22</span>，
+          权限硬编码为 <code>ALLOW</code>
+          <span class="src" data-src="src/agentscope/app/_tool/_team_tool_base.py:152">_team_tool_base.py:152</span>：
+          它们本身不碰文件系统，真正的危险操作发生在 Worker 自己的工具里，仍按 Worker 的权限上下文检查。
+        </p>
+
+        <h2 id="create">AgentCreate：派生 Worker</h2>
+        <p>
+          参数模型在
+          <span class="src" data-src="src/agentscope/app/_tool/_agent_create.py:115">_agent_create.py:115</span>。
+          一次创建至少包含：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>信息</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>name</code><span class="src" data-src="src/agentscope/app/_tool/_agent_create.py:118">_agent_create.py:118</span></td>
+                <td>成员名，也是 <code>TeamSay(to=...)</code> 的地址；团队内必须唯一</td>
+              </tr>
+              <tr>
+                <td>角色描述</td>
+                <td>写进 Worker 的系统提示，告诉它自己负责什么</td>
+              </tr>
+              <tr>
+                <td>首个任务</td>
+                <td>创建后立即交给 Worker 执行</td>
+              </tr>
+              <tr>
+                <td><code>subagent_type</code></td>
+                <td>注册了自定义模板时才出现，选择角色蓝图</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Worker 创建后<strong>立刻开始执行</strong>，不是先挂起等指令。所以 Leader 不要在
+          <code>AgentCreate</code> 后马上再发 <code>TeamSay</code> 重复任务；等它回报或读它的流。
+        </p>
+
+        <h2 id="invite">AgentInvite：借用已有 Agent</h2>
+        <p>
+          <code>AgentInvite</code> 和 <code>AgentCreate</code> 的区别：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th></th>
+                <th><code>AgentCreate</code></th>
+                <th><code>AgentInvite</code></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>来源</td>
+                <td>全新 Worker</td>
+                <td>已存在的 Agent</td>
+              </tr>
+              <tr>
+                <td>工作区</td>
+                <td>继承 Leader 的</td>
+                <td>借用发起方在该 Agent 下的主会话</td>
+              </tr>
+              <tr>
+                <td>团队解散</td>
+                <td>永久删除</td>
+                <td>只删团队会话，Agent 本身不受影响</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          候选池由 Leader <strong>可见</strong>的 Agent 构成，且必须同时满足
+          <code>Invitable=true</code> 与 <code>Invite description</code> 非空。两者缺一，或候选池为空时，
+          Leader 根本不会拿到 <code>AgentInvite</code> 工具。
+        </p>
+        <div class="callout warn">
+          <span class="ct">邀请别人的 Agent 不带对方环境</span>
+          <p>
+            借用会话的工作区与模型取自<strong>发起方自己</strong>在该 Agent 下的主会话，
+            不会带上属主的 MCP、技能、缓存与会话权限。Agent 定义（系统提示、上下文与 ReAct 配置）
+            仍来自原记录。
+          </p>
+        </div>
+
+        <h2 id="say">TeamSay：消息怎么到</h2>
+        <p>
+          <code>TeamSay</code>
+          <span class="src" data-src="src/agentscope/app/_tool/_team_say.py:78">_team_say.py:78</span>
+          不是同步调用。完整链路是：
+        </p>
+        <pre><code>1. 发送方调用 TeamSay
+2. 消息总线把 HintBlock 推到接收方会话的收件箱
+3. 为接收方入队一个唤醒信号
+4. 任意进程的 wakeup dispatcher 取走唤醒
+5. ChatService.run 驱动接收方会话
+6. InboxMiddleware 在下一次推理前清空收件箱
+7. 团队消息以 HintBlockEvent 落入接收方上下文</code></pre>
+        <p>
+          这也解释了为什么团队天然支持分布式：Leader 和 Worker 可以在不同进程、不同节点，
+          只要共享同一个 Redis 消息总线。
+        </p>
+        <div class="callout tip">
+          <span class="ct">消息是「投递」不是「等待」</span>
+          <p>
+            <code>TeamSay</code> 返回时，接收方可能还没开始处理。Leader 要拿到结果，
+            要么等对方再 <code>TeamSay</code> 回来，要么读对方的会话事件流。
+          </p>
+        </div>
+
+        <h2 id="template">SubAgentTemplate：角色化 Worker</h2>
+        <p>
+          默认所有 Worker 共用同一套系统提示与权限。要区分「只读 explorer」和「可写 coder」，
+          注册 <code>SubAgentTemplate</code>
+          <span class="src" data-src="src/agentscope/app/_types.py:114">_types.py:114</span>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>type</code><span class="src" data-src="src/agentscope/app/_types.py:132">_types.py:132</span></td><td>模板标识，成为 <code>subagent_type</code> 的枚举值</td></tr>
+              <tr><td><code>description</code><span class="src" data-src="src/agentscope/app/_types.py:140">_types.py:140</span></td><td>给 Leader 看的选择依据</td></tr>
+              <tr><td><code>system_prompt_template</code><span class="src" data-src="src/agentscope/app/_types.py:148">_types.py:148</span></td><td>Worker 系统提示模板</td></tr>
+              <tr><td><code>permission_context</code><span class="src" data-src="src/agentscope/app/_types.py:167">_types.py:167</span></td><td>角色权限边界，比如 <code>EXPLORE</code></td></tr>
+              <tr><td><code>context_config</code> / <code>react_config</code></td><td>上下文与循环配置</td></tr>
+              <tr><td><code>tasks_context</code><span class="src" data-src="src/agentscope/app/_types.py:214">_types.py:214</span></td><td>预置任务</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>系统提示模板支持五个占位符：</p>
+        <pre><code>{team_name}          {team_description}
+{member_name}        {member_description}
+{leader_name}</code></pre>
+        <pre><code>from agentscope.app import create_app, SubAgentTemplate
+from agentscope.permission import PermissionContext, PermissionMode
+
+app = create_app(
+    storage=storage,
+    message_bus=message_bus,
+    workspace_manager=workspace_manager,
+    custom_subagent_templates=[
+        SubAgentTemplate(
+            type="explorer",
+            description="只读探索代码库，不做任何修改。",
+            system_prompt_template=(
+                "你是 {member_name}，团队 '{team_name}' 的 explorer。\n"
+                "团队目标：{team_description}\n"
+                "你的角色：{member_description}\n"
+                "完成任务后用 TeamSay 向 {leader_name} 汇报。"
+            ),
+            permission_context=PermissionContext(
+                mode=PermissionMode.EXPLORE,
+            ),
+        ),
+    ],
+)</code></pre>
+        <div class="callout warn">
+          <span class="ct">参数名以源码为准</span>
+          <p>
+            官方文档写的是 <code>sub_agent_templates</code>，但 2.0.11 源码里
+            <code>create_app</code> 的参数名是 <code>custom_subagent_templates</code>
+            <span class="src" data-src="src/agentscope/app/_app.py:131">_app.py:131</span>。
+            按源码写，避免 <code>TypeError</code>。
+          </p>
+        </div>
+        <p>
+          没注册模板时，<code>AgentCreate</code> 不暴露 <code>subagent_type</code>；
+          注册后自动出现枚举，包含 <code>"default"</code>。注册一个 <code>type="default"</code>
+          的模板会覆盖内置默认模板；type 重复会在启动时抛 <code>ValueError</code>。
+        </p>
+
+        <h2 id="hitl">团队里的 HITL</h2>
+        <p>
+          Worker 也是普通会话，所以它的工具确认按 08、16 章的规则走：
+        </p>
+        <ul>
+          <li>Worker 停在确认上时，请求原样流到它的会话流</li>
+          <li>答复按 <code>reply_id</code> 路由回该 Worker</li>
+          <li>Worker 挂起期间，Leader 停在对应的分派上，等它完成再继续</li>
+          <li>其他未挂起的 Worker 照常跑完，已完成结果先交回 Leader</li>
+        </ul>
+        <p>
+          Leader 的会话流里还会出现子 Agent 的 HITL 卡片投影（<code>CustomEvent</code>），
+          前端可以据此在 Leader 界面直接提示。
+        </p>
+        <p>
+          框架还用 <code>TeamMemberLoopMiddleware</code>
+          <span class="src" data-src="src/agentscope/app/middleware/_team_member_middleware.py:21">_team_member_middleware.py:21</span>
+          提醒成员「干完要回报」，避免 Worker 自己结束却什么都不说。
+        </p>
+
+        <h2 id="lifecycle">生命周期与成本</h2>
+        <p>
+          只有 Leader 能解散团队。解散时的语义：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>成员来源</th>
+                <th>团队解散后</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>AgentCreate</code> 派生的 Worker</td>
+                <td>永久删除</td>
+              </tr>
+              <tr>
+                <td><code>AgentInvite</code> 邀请的 Agent</td>
+                <td>只删该团队会话，Agent 本身保留</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct">每个 Worker 都是一份完整 token 开销</span>
+          <p>
+            Worker 不是轻量协程，而是独立会话：自己的模型调用、工具调用、上下文压缩。
+            派生 5 个 Worker，成本大致是 6 份（Leader + 5）。先想清楚是否真的需要这么多。
+          </p>
+        </div>
+
+        <h2 id="compare">SDK TeamPipeline vs Service Agent Team</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>维度</th>
+                <th>SDK <code>TeamPipeline</code></th>
+                <th>Service Agent Team</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>运行位置</td>
+                <td>同一进程</td>
+                <td>任意进程 / 节点</td>
+              </tr>
+              <tr>
+                <td>成员形态</td>
+                <td>内存里的 Agent 实例</td>
+                <td>完整 Session</td>
+              </tr>
+              <tr>
+                <td>通信</td>
+                <td>直接调用 <code>reply_stream</code></td>
+                <td>消息总线 + 收件箱 + 唤醒</td>
+              </tr>
+              <tr>
+                <td>前端可观察</td>
+                <td>你自己消费一个流</td>
+                <td>每个成员独立 SSE 流</td>
+              </tr>
+              <tr>
+                <td>持久化</td>
+                <td>无</td>
+                <td><code>TeamRecord</code> + 会话状态</td>
+              </tr>
+              <tr>
+                <td>适合</td>
+                <td>脚本、固定协作流程</td>
+                <td>产品级多智能体、多用户</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>建团队</td><td><code>TeamCreate</code>（Leader 自动调用）</td></tr>
+              <tr><td>派生 Worker</td><td><code>AgentCreate(name=..., description=..., prompt=...)</code></td></tr>
+              <tr><td>邀请已有 Agent</td><td><code>AgentInvite</code></td></tr>
+              <tr><td>给成员发消息</td><td><code>TeamSay(to=..., message=...)</code></td></tr>
+              <tr><td>解散</td><td><code>TeamDelete</code></td></tr>
+              <tr><td>注册角色模板</td><td><code>custom_subagent_templates=[SubAgentTemplate(...)]</code></td></tr>
+              <tr><td>让 Agent 可被邀请</td><td>设 <code>Invitable=true</code> + <code>Invite description</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">把 <code>TeamSay</code> 当同步函数</span>
+          <p>
+            它只负责投递 + 唤醒。返回时对方可能还没处理。要结果就等对方回报，或读对方会话流。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">以为 Worker 能继续派生 Worker</span>
+          <p>
+            Worker 只看到 <code>TeamSay</code>。派生、邀请、解散都只有 Leader 能做。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">在 <code>AgentCreate</code> 后立刻再发一遍任务</span>
+          <p>
+            Worker 创建后立即执行首任务。再发一遍会重复劳动，甚至互相覆盖。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">用文档里的 <code>sub_agent_templates</code></span>
+          <p>
+            2.0.11 源码参数是 <code>custom_subagent_templates</code>。以源码为准，
+            否则启动时 <code>TypeError</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">忘记设 <code>Invitable</code></span>
+          <p>
+            候选池为空时，Leader 根本看不到 <code>AgentInvite</code>。
+            <code>Invitable</code> 和 <code>Invite description</code> 两个都要填。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">给 Worker 设置更窄的权限</span>
+          <p>
+            默认 Worker 继承 Leader 的权限设置。只读角色用
+            <code>PermissionContext(mode=PermissionMode.EXPLORE)</code>，
+            比在提示词里写「不要改文件」可靠得多。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li><code>AgentCreate</code> 和 <code>AgentInvite</code> 在团队解散后的行为有什么不同？</li>
+          <li><code>TeamSay</code> 的消息经过哪些环节才进入接收方上下文？</li>
+          <li>为什么服务层 Team 能让 Leader 和 Worker 分布在不同进程？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>在示例服务里让 Leader 组一个两人团队，观察 <code>TeamCreate</code> / <code>AgentCreate</code> 的调用。</li>
+          <li>注册一个 <code>explorer</code> 模板（<code>EXPLORE</code> 模式），让 Leader 派生它，确认它不能写文件。</li>
+          <li>用 <code>TeamSay</code> 给 Worker 追加一条指令，观察它在下一次唤醒时处理。</li>
+          <li>让一个 Worker 停在工具确认上，确认答复按 <code>reply_id</code> 回到正确的成员。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          团队把多智能体协作搬到了服务层。下一章 <strong>18 消息渠道</strong> 讲怎么让 Agent 入驻飞书、钉钉、Discord：
+          <code>ChannelBase</code>、会话路由与凭证绑定。
+          18 章尚未发布前，可以先回 <a href="15-agent-service.html">15 Agent Service</a>
+          复习资源模型。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

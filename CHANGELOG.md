@@ -2,6 +2,20 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.17.0 — 2026-11-07
+
+新增第 17 章「Agent Team」，讲服务层的多智能体协作。
+
+- **概念**：Team / Leader / Worker / Team Message，成员是独立会话而非协程。
+- **五个工具**：`TeamCreate`、`AgentCreate`、`AgentInvite`、`TeamSay`、`TeamDelete`；Worker 只见 `TeamSay`。
+- **派生**：`AgentCreate` 的名称、角色、首任务与 `subagent_type`；创建即执行。
+- **邀请**：`AgentInvite` 与 `AgentCreate` 的差异，候选池与 `Invitable` / `Invite description`。
+- **通信**：`TeamSay` 的投递 + 唤醒链路，以及 `InboxMiddleware` 的注入。
+- **模板**：`SubAgentTemplate` 字段、五个占位符、`EXPLORE` 只读角色。
+- **HITL**：按 `reply_id` 路由、Leader 等待、子 Agent 卡片投影。
+- **生命周期**：两种成员在团队解散后的不同处理，以及成本提醒。
+- **核对**：文档写 `sub_agent_templates`，源码参数是 `custom_subagent_templates`，正文按源码写并标注。
+
 ## v0.16.0 — 2026-11-07
 
 新增第 16 章「会话与 SSE」，把前后端契约讲完整。
