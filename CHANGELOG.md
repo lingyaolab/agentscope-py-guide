@@ -2,6 +2,18 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.7.0 — 2026-11-06
+
+新增第 07 章「中间件」，把横切逻辑从 Agent 源码里搬出来。
+
+- **七个钩子**：`on_reply`、`on_reasoning`、`on_acting`、`on_check_permission`、`on_model_call`、`on_compress_context`、`on_system_prompt`，外加 `list_tools`。
+- **顺序**：洋葱式「第一个在最外层」，变换式「从左到右接力」，以及流式事件的内层优先。
+- **自定义**：一个同时观察 reply / 模型 / 工具的审计中间件；工具钩子与权限钩子的分工。
+- **权限**：`on_check_permission` 拿到的是副本，直接返回会跳过内置引擎。
+- **进阶**：吞掉 `ReplyEndEvent` 强制再来一轮，以及必须自己处理的轮次与重试上限。
+- **内置**：`TracingMiddleware`、`ReplyBudgetControlMiddleware`、`ModelRouterMiddleware`、`RAGMiddleware`、`TTSMiddleware` 与记忆中间件。
+- **状态**：为什么中间件状态要放 `agent.state.middle_context`，而不是实例属性。
+
 ## v0.6.0 — 2026-11-06
 
 新增第 06 章「上下文管理」，把 Agent 的工作记忆讲成可调参的三套机制。

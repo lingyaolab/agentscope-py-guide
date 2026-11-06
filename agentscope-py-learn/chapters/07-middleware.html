@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 中间件：on_reply / on_reasoning / on_acting / on_model_call / on_check_permission / on_compress_context / on_system_prompt 七个钩子、洋葱顺序、自定义审计中间件与内置中间件。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="07 中间件：在生命周期关键点插手 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="七个钩子、洋葱顺序、自定义审计中间件、工具与模型调用钩子、权限拦截，以及内置中间件。" />
+    <title>07 中间件：在生命周期关键点插手 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="07-middleware" data-root="..">
+    <main>
+      <article class="article">
+        <h1>07 · 中间件</h1>
+        <p class="lede">
+          06 章的压缩、卸载、注入都是框架内置行为。如果你想加自己的逻辑——审计、限流、模型降级、
+          动态系统提示——又不想改 <code>Agent</code> 源码，就用<strong>中间件</strong>。
+          这一章讲清七个钩子的位置、洋葱顺序，以及哪些事不该在中间件里做。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>说出七个钩子分别包住哪一段流程，以及哪个是洋葱式、哪个是变换式</li>
+          <li>写一个能同时观察 reply / 推理 / 模型调用 / 工具执行的审计中间件</li>
+          <li>用 <code>on_check_permission</code> 拦截危险工具，而不改权限引擎</li>
+          <li>解释为什么中间件实例不能随便存「当前回复」状态</li>
+        </ul>
+
+        <h2 id="why">先说为什么：横切逻辑不该散落在 Agent 里</h2>
+        <p>
+          日志、计时、限流、模型降级、动态提示，这些东西会横穿整个流程，但不属于 Agent 的核心职责。
+          如果直接改 <code>Agent</code>，每加一个需求就要动一次核心代码，还会和框架升级打架。
+        </p>
+        <p>
+          中间件的做法是：在生命周期的固定位置留钩子，你自己的类实现需要的钩子即可。
+          Agent 在构造时扫描每个实例，按实际实现了哪些钩子分配到不同链上
+          <span class="src" data-src="src/agentscope/agent/_agent.py:219">_agent.py:219</span>；
+          没实现的钩子不产生任何调用开销。
+        </p>
+        <div class="stack">
+          <div class="layer accent">
+            <span class="lt">Onion（洋葱式）</span>
+            <div class="ld">中间件包住下一层：<code>before → next_handler() → after</code>。</div>
+          </div>
+          <div class="layer in2">
+            <span class="lt">Transformer（变换式）</span>
+            <div class="ld">串成流水线：上一个的输出是下一个的输入，没有「内层」。</div>
+          </div>
+          <div class="layer in3">
+            <span class="lt">Tool source（工具来源）</span>
+            <div class="ld">声明工具，但不在 reply 路径上，Agent 不会自动调用。</div>
+          </div>
+        </div>
+
+        <h2 id="hooks">七个钩子：一张表看清</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>钩子</th>
+                <th>类型</th>
+                <th>包住什么</th>
+                <th>能拿到</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>on_reply</code><span class="src" data-src="src/agentscope/middleware/_base.py:68">_base.py:68</span></td>
+                <td>Onion</td>
+                <td>一次完整 reply（所有 ReAct 轮次）</td>
+                <td><code>inputs</code></td>
+              </tr>
+              <tr>
+                <td><code>on_reasoning</code><span class="src" data-src="src/agentscope/middleware/_base.py:101">_base.py:101</span></td>
+                <td>Onion</td>
+                <td>一轮推理（组装输入 → 模型调用 → 解码）</td>
+                <td><code>tool_choice</code></td>
+              </tr>
+              <tr>
+                <td><code>on_acting</code><span class="src" data-src="src/agentscope/middleware/_base.py:124">_base.py:124</span></td>
+                <td>Onion</td>
+                <td><strong>仅</strong> <code>toolkit.call_tool</code> 的执行</td>
+                <td><code>tool_call</code></td>
+              </tr>
+              <tr>
+                <td><code>on_check_permission</code><span class="src" data-src="src/agentscope/middleware/_base.py:170">_base.py:170</span></td>
+                <td>Onion</td>
+                <td>一次工具调用的权限决策</td>
+                <td><code>tool_call</code>、<code>tool</code>、<code>tool_input</code></td>
+              </tr>
+              <tr>
+                <td><code>on_model_call</code><span class="src" data-src="src/agentscope/middleware/_base.py:213">_base.py:213</span></td>
+                <td>Onion</td>
+                <td>一次底层模型 API 调用</td>
+                <td><code>messages</code>、<code>tools</code>、<code>tool_choice</code>、<code>current_model</code></td>
+              </tr>
+              <tr>
+                <td><code>on_compress_context</code><span class="src" data-src="src/agentscope/middleware/_base.py:241">_base.py:241</span></td>
+                <td>Onion</td>
+                <td><code>Agent.compress_context()</code></td>
+                <td><code>context_config</code>、<code>instructions</code></td>
+              </tr>
+              <tr>
+                <td><code>on_system_prompt</code><span class="src" data-src="src/agentscope/middleware/_base.py:264">_base.py:264</span></td>
+                <td>Transformer</td>
+                <td>每次组装系统提示</td>
+                <td><code>current_prompt</code>（字符串）</td>
+              </tr>
+              <tr>
+                <td><code>list_tools</code><span class="src" data-src="src/agentscope/middleware/_base.py:286">_base.py:286</span></td>
+                <td>Tool source</td>
+                <td>不在执行路径上</td>
+                <td>—</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          一个中间件类可以实现任意子集。Agent 构造时会分成七条链
+          <span class="src" data-src="src/agentscope/agent/_agent.py:221">_agent.py:221</span>。
+        </p>
+        <div class="callout warn">
+          <span class="ct"><code>on_acting</code> 不包含权限与上下文写入</span>
+          <p>
+            它只包住 <code>toolkit.call_tool</code> 这一层纯执行
+            <span class="src" data-src="src/agentscope/middleware/_base.py:132">_base.py:132</span>。
+            权限检查在它之前，工具结果的上下文写入在它之后。所以「统计工具耗时」用
+            <code>on_acting</code>，「拦截工具」用 <code>on_check_permission</code>。
+          </p>
+        </div>
+
+        <h2 id="order">顺序：谁在外面，谁在里面</h2>
+        <p>
+          洋葱型钩子：<strong>列表里第一个中间件在最外层</strong>。
+        </p>
+        <pre><code>middlewares = [mw1, mw2]
+# mw1 前 → mw2 前 → 内部逻辑 → mw2 后 → mw1 后</code></pre>
+        <p>
+          流式钩子还有一层细节：内层先看到每一个 yield 出来的事件。
+        </p>
+        <pre><code>mw1_pre → mw2_pre → mw2_event → mw1_event → ... → mw2_post → mw1_post</code></pre>
+        <p>
+          变换式的 <code>on_system_prompt</code> 则是从左到右接力
+          <span class="src" data-src="src/agentscope/agent/_agent.py:3248">_agent.py:3248</span>：
+        </p>
+        <pre><code>original_prompt → mw1.on_system_prompt() → mw2.on_system_prompt() → final</code></pre>
+        <h3>整体嵌套关系</h3>
+        <pre><code>on_reply
+  └── 每一轮 ReAct：
+        ├── on_compress_context → compress_context()
+        │     └── on_system_prompt（压缩前数 token）
+        ├── on_reasoning
+        │     ├── on_system_prompt（组装模型输入）
+        │     └── on_model_call
+        └── on_acting（本轮每个工具调用一次）</code></pre>
+        <p>
+          对应到源码：<code>_reply</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:915">_agent.py:915</span>、
+          <code>_reasoning</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:1664">_agent.py:1664</span>、
+          <code>_acting</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:2752">_agent.py:2752</span>、
+          <code>_check_permission</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:2366">_agent.py:2366</span>、
+          <code>_call_model</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:3334">_agent.py:3334</span>
+          各有一段「有中间件 / 无中间件」的分支。
+        </p>
+
+        <h2 id="reply">上手：一个审计中间件</h2>
+        <p>
+          下面这个中间件同时观察 reply、模型调用和工具执行，足够覆盖大多数排查场景：
+        </p>
+        <pre><code>import time
+
+from agentscope.middleware import MiddlewareBase
+
+
+class AuditMiddleware(MiddlewareBase):
+    async def on_reply(self, agent, input_kwargs, next_handler):
+        print(f"[reply] {agent.name} start")
+        async for item in next_handler(**input_kwargs):
+            yield item
+        print(f"[reply] {agent.name} end")
+
+    async def on_model_call(self, agent, input_kwargs, next_handler):
+        model = input_kwargs["current_model"].model
+        start = time.time()
+        result = await next_handler(**input_kwargs)
+        print(f"[model] {model} {time.time() - start:.2f}s")
+        return result
+
+    async def on_acting(self, agent, input_kwargs, next_handler):
+        tool_call = input_kwargs["tool_call"]
+        start = time.time()
+        async for chunk in next_handler(**input_kwargs):
+            yield chunk
+        print(f"[tool] {tool_call.name} {time.time() - start:.2f}s")</code></pre>
+        <p>挂载方式：</p>
+        <pre><code>agent = Agent(
+    name="Friday",
+    system_prompt="...",
+    model=model,
+    toolkit=toolkit,
+    middlewares=[AuditMiddleware()],
+)</code></pre>
+        <div class="callout tip">
+          <span class="ct">一个类实现多个钩子就够了</span>
+          <p>
+            不需要为每个钩子建一个类。把它们放在同一个类里，Agent 会按钩子把同一个实例分到多条链上。
+            想按顺序控制，就把需要在外层的实例放在列表前面。
+          </p>
+        </div>
+
+        <h2 id="acting">工具钩子：在工具执行前后插手</h2>
+        <p>
+          <code>on_acting</code> 的 <code>next_handler</code> 产出的是
+          <code>ToolChunk</code> 流，最后一个是完整的 <code>ToolResponse</code>。
+          你可以观察、修改、甚至替换整段流：
+        </p>
+        <pre><code>from agentscope.tool import ToolChunk, ToolResponse
+
+
+class ToolAuditMiddleware(MiddlewareBase):
+    async def on_acting(self, agent, input_kwargs, next_handler):
+        tool_call = input_kwargs["tool_call"]
+        print(f"[tool] {tool_call.name} input={tool_call.input}")
+        async for chunk in next_handler(**input_kwargs):
+            if isinstance(chunk, ToolChunk):
+                print(f"[chunk] {len(chunk.content)} blocks")
+            else:
+                print(f"[response] state={chunk.state}")
+            yield chunk</code></pre>
+        <div class="callout warn">
+          <span class="ct">别在 <code>on_acting</code> 里做权限判断</span>
+          <p>
+            走到 <code>on_acting</code> 时，工具已经被解析、参数已验证、权限也已经通过
+            <span class="src" data-src="src/agentscope/middleware/_base.py:178">_base.py:178</span>。
+            在这里抛异常虽然能中断执行，但不会产生权限系统的事件与规则，前端既看不到
+            <code>REQUIRE_USER_CONFIRM</code>，也拿不到 <code>DENIED</code> 的工具结果。
+            要拒绝工具，用 <code>on_check_permission</code>。
+          </p>
+        </div>
+
+        <h2 id="modelcall">模型调用钩子：改输入、改输出</h2>
+        <p>
+          <code>on_model_call</code> 是最贴近模型的一层，能拿到四个字段
+          <span class="src" data-src="src/agentscope/middleware/_base.py:226">_base.py:226</span>：
+          <code>messages</code>、<code>tools</code>、<code>tool_choice</code>、<code>current_model</code>。
+          改 <code>messages</code> 可以注入临时上下文；换 <code>current_model</code> 可以做降级。
+        </p>
+        <pre><code>class ModelFallbackMiddleware(MiddlewareBase):
+    def __init__(self, fallback_model):
+        self._fallback = fallback_model
+
+    async def on_model_call(self, agent, input_kwargs, next_handler):
+        try:
+            return await next_handler(**input_kwargs)
+        except Exception as e:
+            print(f"primary failed: {e}")
+            return await next_handler(current_model=self._fallback)</code></pre>
+        <div class="callout warn">
+          <span class="ct">流式调用的失败可能发生在「返回之后」</span>
+          <p>
+            <code>next_handler</code> 返回的是 <code>ChatResponse</code> 或
+            <code>AsyncGenerator</code>。流式时，连接错误可能在你拿到 generator 之后才抛。
+            想做可靠的降级，要么先把流消费成非流式，要么在生成器内部捕获
+            <span class="src" data-src="src/agentscope/middleware/_base.py:219">_base.py:219</span>。
+          </p>
+        </div>
+
+        <h2 id="permission">权限钩子：拦截与放行</h2>
+        <p>
+          <code>on_check_permission</code> 在工具解析、参数校验之后，决策被消费之前执行
+          <span class="src" data-src="src/agentscope/middleware/_base.py:178">_base.py:178</span>。
+          它拿到的是 <code>tool_call</code>、<code>tool</code>、<code>tool_input</code> 的<strong>副本</strong>，
+          改副本不会影响真正执行
+          <span class="src" data-src="src/agentscope/agent/_agent.py:2373">_agent.py:2373</span>。
+        </p>
+        <pre><code>from agentscope.permission import PermissionBehavior, PermissionDecision
+
+
+class DenyBashMiddleware(MiddlewareBase):
+    async def on_check_permission(self, agent, input_kwargs, next_handler):
+        if input_kwargs["tool_call"].name == "Bash":
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                message="Bash is disabled in this environment.",
+            )
+        return await next_handler(**input_kwargs)</code></pre>
+        <p>
+          不调用 <code>next_handler</code> 就直接返回，会<strong>跳过</strong>内置权限引擎
+          <span class="src" data-src="src/agentscope/middleware/_base.py:187">_base.py:187</span>。
+          这既是能力也是风险：你等于接管了这次调用的全部判断。
+        </p>
+        <p>
+          如果只是想「加一条规则」，更稳的做法是调用 <code>next_handler</code> 拿到原决策，
+          再按需要升级或降级，而不是完全替换。
+        </p>
+
+        <h2 id="continue">进阶：吞掉 ReplyEndEvent，强制再来一轮</h2>
+        <p>
+          <code>on_reply</code> 不只能观察。如果它收到 <code>ReplyEndEvent</code> 却<strong>不 yield</strong>，
+          reply 就不会结束，Agent 会再走一轮推理
+          <span class="src" data-src="src/agentscope/middleware/_base.py:76">_base.py:76</span>。
+        </p>
+        <pre><code>from agentscope.event import ReplyEndEvent
+from agentscope.message import HintBlock
+from agentscope.types import ReplyFinishedReason
+
+
+class ContinueOnceMiddleware(MiddlewareBase):
+    async def on_reply(self, agent, input_kwargs, next_handler):
+        continued = False
+        async for item in next_handler(**input_kwargs):
+            can_continue = (
+                isinstance(item, ReplyEndEvent)
+                and item.finished_reason
+                in {
+                    ReplyFinishedReason.COMPLETED,
+                    ReplyFinishedReason.EXCEED_MAX_ITERS,
+                }
+                and not continued
+            )
+            if can_continue:
+                continued = True
+                agent.state.cur_iter = min(
+                    agent.state.cur_iter,
+                    agent.react_config.max_iters - 1,
+                )
+                agent.state.append_context(
+                    agent.name,
+                    [HintBlock(hint="结束前请再检查一遍结果。")],
+                )
+                continue
+            yield item</code></pre>
+        <div class="callout warn">
+          <span class="ct">这是最容易写出死循环的钩子</span>
+          <p>
+            必须自己设重试上限；如果吞的是 <code>EXCEED_MAX_ITERS</code>，还要先释放轮次
+            （如上例调整 <code>cur_iter</code>），否则下一轮没有预算。
+            <code>INTERRUPTED</code> 的结束事件<strong>不能</strong>用这个机制续命，应原样传出。
+          </p>
+        </div>
+
+        <h2 id="builtin">内置中间件：追踪、预算、路由、RAG</h2>
+        <p>
+          内置实现都从 <code>agentscope.middleware</code> 导出
+          <span class="src" data-src="src/agentscope/middleware/__init__.py:5">__init__.py:5</span>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>中间件</th>
+                <th>钩子位置</th>
+                <th>用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>TracingMiddleware</code></td>
+                <td><code>on_reply</code> / <code>on_model_call</code> / <code>on_acting</code></td>
+                <td>OpenTelemetry 链路追踪</td>
+              </tr>
+              <tr>
+                <td><code>ReplyBudgetControlMiddleware</code><span class="src" data-src="src/agentscope/middleware/_budget.py:29">_budget.py:29</span></td>
+                <td><code>on_reply</code> / <code>on_reasoning</code></td>
+                <td>单次 reply 的加权 token 预算</td>
+              </tr>
+              <tr>
+                <td><code>ModelRouterMiddleware</code><span class="src" data-src="src/agentscope/middleware/_model_router.py:37">_model_router.py:37</span></td>
+                <td><code>on_reply</code></td>
+                <td>按输入为每次回复选择模型</td>
+              </tr>
+              <tr>
+                <td><code>RAGMiddleware</code><span class="src" data-src="src/agentscope/middleware/_rag.py:626">_rag.py:626</span></td>
+                <td><code>on_reply</code> / <code>on_reasoning</code></td>
+                <td>接入外部知识库</td>
+              </tr>
+              <tr>
+                <td><code>TTSMiddleware</code><span class="src" data-src="src/agentscope/middleware/_tts_middleware.py:21">_tts_middleware.py:21</span></td>
+                <td><code>on_reply</code></td>
+                <td>把文本输出合成语音</td>
+              </tr>
+              <tr>
+                <td><code>Mem0Middleware</code> / <code>ReMeMiddleware</code> / <code>AgenticMemoryMiddleware</code></td>
+                <td>多个</td>
+                <td>跨会话长期记忆（11 章）</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>预算控制</h3>
+        <p>
+          加权成本 = <code>input_token_weight × input</code> + <code>output_token_weight × output</code>
+          <span class="src" data-src="src/agentscope/middleware/_budget.py:35">_budget.py:35</span>。
+          达到预算后，它会往最后一条 assistant 消息追加 <code>HintBlock</code>，并把下一步的
+          <code>tool_choice</code> 强制改成 <code>none</code>，逼模型收尾
+          <span class="src" data-src="src/agentscope/middleware/_budget.py:230">_budget.py:230</span>。
+        </p>
+        <pre><code>from agentscope.middleware import ReplyBudgetControlMiddleware
+
+agent = Agent(
+    ...,
+    middlewares=[
+        ReplyBudgetControlMiddleware(
+            token_budget=10000,
+            input_token_weight=1.0,
+            output_token_weight=2.0,
+        ),
+    ],
+)</code></pre>
+        <p>
+          它的状态不放在实例上，而是放在 <code>agent.state.middle_context</code>，按中间件 key 和
+          <code>reply_id</code> 索引
+          <span class="src" data-src="src/agentscope/middleware/_budget.py:45">_budget.py:45</span>。
+          这样同一个实例可以跨 Agent、跨 HITL 恢复安全复用。
+        </p>
+        <h3>模型路由</h3>
+        <p>
+          每次 reply 开始时选一次模型，回复期间替换 <code>agent.model</code>，结束后在
+          <code>finally</code> 里恢复
+          <span class="src" data-src="src/agentscope/middleware/_model_router.py:109">_model_router.py:109</span>。
+          路由失败或输入里没有用户文本时，沿用原模型，不中断回复。
+        </p>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>用哪个钩子</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>记录整次回复耗时 / 事件</td><td><code>on_reply</code></td></tr>
+              <tr><td>改系统提示</td><td><code>on_system_prompt</code></td></tr>
+              <tr><td>改模型输入 / 换模型</td><td><code>on_model_call</code></td></tr>
+              <tr><td>统计或包装工具执行</td><td><code>on_acting</code></td></tr>
+              <tr><td>拦截工具 / 改权限决策</td><td><code>on_check_permission</code></td></tr>
+              <tr><td>在压缩前后加逻辑</td><td><code>on_compress_context</code></td></tr>
+              <tr><td>强制再来一轮</td><td><code>on_reply</code> 吞掉 <code>ReplyEndEvent</code></td></tr>
+              <tr><td>贡献工具</td><td><code>list_tools</code>（需手动收集）</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">在实例属性里存「当前回复」状态</span>
+          <p>
+            中间件实例可能被多个 Agent、多次 reply 复用。把 <code>self.current_reply_id</code>
+            这类状态放实例上，并发时会串。正确做法是放 <code>agent.state.middle_context</code>，
+            用 <code>reply_id</code> 隔离，像 <code>ReplyBudgetControlMiddleware</code> 那样。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">把流式返回值当普通值 <code>await</code></span>
+          <p>
+            <code>on_model_call</code> 的 <code>next_handler</code> 可能返回
+            <code>AsyncGenerator</code>。直接 <code>await</code> 它不会消费内容。
+            <code>on_acting</code> 则总是在处理异步生成器，必须 <code>async for</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">误以为 <code>on_acting</code> 能看到权限事件</span>
+          <p>
+            权限确认发生在 <code>on_check_permission</code> 和 <code>_execute_tool_call</code>，
+            不在 <code>on_acting</code> 里。想审计「哪些工具被拒绝」，应该挂
+            <code>on_check_permission</code> 或从事件流里读。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">只实现需要的钩子</span>
+          <p>
+            没实现的钩子会被 <code>is_implemented</code> 过滤掉
+            <span class="src" data-src="src/agentscope/middleware/_base.py:55">_base.py:55</span>，
+            不会产生调用。不要为了「统一」把七个钩子都写一遍，只留空实现反而增加维护成本。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">用 <code>get_middleware_key()</code> 区分状态</span>
+          <p>
+            默认 key 是类名。同一个类挂两份、又都要在 <code>middle_context</code> 里存状态时，
+            覆写 <code>get_middleware_key()</code> 返回不同值
+            <span class="src" data-src="src/agentscope/middleware/_base.py:296">_base.py:296</span>。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li><code>[A, B]</code> 两个中间件都实现了 <code>on_model_call</code>，谁的「前逻辑」先执行？流式事件谁先看到？</li>
+          <li>为什么「统计工具耗时」不该用 <code>on_check_permission</code>，「拦截工具」不该用 <code>on_acting</code>？</li>
+          <li>吞掉 <code>ReplyEndEvent</code> 后，为什么必须处理 <code>cur_iter</code> 或重试上限？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>实现一个 <code>on_model_call</code> 中间件，把每次调用的输入消息数、工具数、模型名打印出来。</li>
+          <li>实现一个 <code>on_system_prompt</code> 中间件，在系统提示末尾追加当前日期，确认它按列表顺序接力。</li>
+          <li>用 <code>on_check_permission</code> 禁止某个工具，观察事件流里是否还出现 <code>REQUIRE_USER_CONFIRM</code>。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          中间件给了你「插手」的能力，下一章 <strong>08 权限与 HITL</strong> 讲这套能力最重要的用途：
+          让危险工具在真正执行前停下来问人，并把用户的选择变成可恢复的事件。
+          08 章尚未发布前，可以先回 <a href="05-tool.html">05 工具系统</a> 复习工具的权限字段。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
