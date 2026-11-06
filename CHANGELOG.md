@@ -2,6 +2,20 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.16.0 — 2026-11-07
+
+新增第 16 章「会话与 SSE」，把前后端契约讲完整。
+
+- **建会话**：`POST /sessions` 的最小请求体、`(user, agent, workspace)` 三元组唯一。
+- **触发**：`POST /chat` fire-and-forget、五种输入、同会话 409。
+- **SSE**：`data: <json>`、30 秒心跳、`Cache-Control` 与 `X-Accel-Buffering`。
+- **重放**：先订阅再回放、`after` 游标、`_entry_id` 去重、连接跨多次 run。
+- **分页**：`before` 游标、`offset` 废弃、`event_cursor` 只在最新页返回。
+- **状态**：`running` / `idle` / `awaiting_permission` / `awaiting_external_result` 与优先级。
+- **中断**：202 的异步语义、续接方式。
+- **协议**：`ProtocolMiddlewareBase` 与 `AGUIProtocolMiddleware`。
+- **前端契约**：`reply_id` / `block_id`、心跳、去重、状态驱动。
+
 ## v0.15.0 — 2026-11-07
 
 新增第 15 章「Agent Service」，把 Agent 变成多租户 HTTP 服务。

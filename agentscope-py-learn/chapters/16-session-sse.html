@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 会话与 SSE：创建会话、POST /chat、SSE 帧与心跳、断线重放 after 游标、多订阅者去重、消息分页、四种会话状态、中断与 AG-UI 协议适配。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="16 会话与 SSE：事件流怎么推到前端 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="创建会话、POST /chat、SSE 帧与心跳、断线重放 after 游标、多订阅者去重、消息分页、四种会话状态、中断与 AG-UI 协议适配。" />
+    <title>16 会话与 SSE：事件流怎么推到前端 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="16-session-sse" data-root="..">
+    <main>
+      <article class="article">
+        <h1>16 · 会话与 SSE</h1>
+        <p class="lede">
+          15 章把服务跑起来了，但前端只拿到一个 <code>session_id</code> 和一条 SSE 连接。
+          这一章讲清楚：<strong>会话怎么建、消息怎么发、事件帧长什么样、断线怎么续、状态怎么判断</strong>。
+          写前端的人看完应该能不看源码就把界面接出来。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>用正确的最小请求体创建一个会话，并知道哪些配置可以后补</li>
+          <li>解释 <code>POST /chat</code> 为什么立刻返回，事件从哪里来</li>
+          <li>处理 SSE 的 <code>data:</code> 帧、心跳、重放游标与重复事件</li>
+          <li>用 <code>before</code> 做消息分页，用四种状态驱动界面指示器</li>
+        </ul>
+
+        <h2 id="why">先说为什么：SSE 不是「把 JSON 一行行发出去」</h2>
+        <p>
+          一个能用的聊天前端，要同时处理五件事：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>问题</th>
+                <th>服务端的答案</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>断线了怎么办？</td><td>回放日志 + <code>after</code> 游标</td></tr>
+              <tr><td>多个标签页同时看？</td><td>扇出 + 按 entry id 去重</td></tr>
+              <tr><td>代理把流缓冲了？</td><td><code>X-Accel-Buffering: no</code> + 心跳</td></tr>
+              <tr><td>现在到底在跑还是等人？</td><td>四值 <code>SessionStatus</code></td></tr>
+              <tr><td>历史消息怎么翻？</td><td><code>before</code> 游标分页</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          这些都不是「发 JSON」本身，而是围绕事件流的<strong>协议</strong>。
+        </p>
+
+        <h2 id="create">创建会话</h2>
+        <p>
+          <code>POST /sessions</code>
+          <span class="src" data-src="src/agentscope/app/_router/_session.py:294">_session.py:294</span>
+          的请求体里，只有 <code>agent_id</code> 必填：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>必填</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>agent_id</code><span class="src" data-src="src/agentscope/app/_router/_schema/_session.py:60">_session.py:60</span></td><td>是</td><td>会话归属的 Agent 模板</td></tr>
+              <tr><td><code>workspace_id</code></td><td>否</td><td>显式绑定工作区；省略时由 manager 按策略分配</td></tr>
+              <tr><td><code>name</code></td><td>否</td><td>展示名；省略时服务会在首轮后自动命名</td></tr>
+              <tr><td><code>chat_model_config</code><span class="src" data-src="src/agentscope/app/_router/_schema/_session.py:76">_schema/_session.py:76</span></td><td>否</td><td>模型与凭证；可以后补</td></tr>
+              <tr><td><code>fallback_chat_model_config</code></td><td>否</td><td>主模型失败时的备用</td></tr>
+              <tr><td><code>tts_model_config</code> / <code>realtime_model_config</code></td><td>否</td><td>语音相关</td></tr>
+              <tr><td><code>knowledge_config</code></td><td>否</td><td>绑定的知识库与 RAG 参数</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <pre><code>POST /sessions
+X-User-ID: alice
+{
+  "agent_id": "agent-xxx",
+  "chat_model_config": {
+    "type": "deepseek_credential",
+    "credential_id": "cred-xxx",
+    "model": "deepseek-v4-flash",
+    "parameters": {}
+  }
+}
+
+→ 200 {"session_id": "session-xxx"}</code></pre>
+        <p>
+          一个 <code>(user_id, agent_id, workspace_id)</code> 三元组最多只有一个会话：
+          同样的三元组再建一次，会<strong>更新</strong>已有会话，而不是新建
+          <span class="src" data-src="src/agentscope/app/_router/_session.py:303">_session.py:303</span>。
+        </p>
+
+        <h2 id="chat">触发运行</h2>
+        <p>
+          <code>POST /chat</code>
+          <span class="src" data-src="src/agentscope/app/_router/_chat.py:54">_chat.py:54</span>
+          是 fire-and-forget：立刻返回 <code>{"status": "started"}</code>，真正的事件通过 SSE 推。
+        </p>
+        <p><code>input</code> 支持五种形态：</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>输入</th>
+                <th>含义</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>Msg</code></td><td>一条新用户消息</td></tr>
+              <tr><td><code>list[Msg]</code></td><td>一批消息</td></tr>
+              <tr><td><code>UserConfirmResultEvent</code></td><td>HITL 确认结果</td></tr>
+              <tr><td><code>ExternalExecutionResultEvent</code></td><td>外部执行结果</td></tr>
+              <tr><td><code>None</code></td><td>继续当前状态</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <pre><code>POST /chat
+X-User-ID: alice
+{
+  "agent_id": "agent-xxx",
+  "session_id": "session-xxx",
+  "input": {
+    "name": "alice",
+    "role": "user",
+    "content": [{"type": "text", "text": "Hello"}]
+  }
+}</code></pre>
+        <div class="callout warn">
+          <span class="ct">同一会话同时只能跑一次</span>
+          <p>
+            会话被某个 worker 持有运行锁时，第二次 <code>POST /chat</code> 返回
+            HTTP 409。要并行，用多个会话。
+          </p>
+        </div>
+
+        <h2 id="sse">SSE 帧</h2>
+        <p>
+          <code>GET /sessions/{id}/stream</code>
+          <span class="src" data-src="src/agentscope/app/_router/_session.py:815">_session.py:815</span>
+          返回 <code>text/event-stream</code>。每一帧：
+        </p>
+        <pre><code>data: {"type":"TEXT_BLOCK_DELTA","reply_id":"...","block_id":"...","delta":"你",...}
+
+data: {"type":"TEXT_BLOCK_DELTA",...}
+
+:   ← 每 30 秒一条心跳注释帧</code></pre>
+        <ul>
+          <li><strong>没有 <code>event:</code> 字段</strong>：类型在 JSON 的 <code>type</code> 里</li>
+          <li>JSON 来自 <code>event.model_dump(mode="json")</code>，枚举已是字符串</li>
+          <li>心跳是 <code>:\n\n</code>，间隔 30 秒
+            <span class="src" data-src="src/agentscope/app/_router/_session.py:750">_session.py:750</span></li>
+          <li>响应头带 <code>Cache-Control: no-cache</code> 与 <code>X-Accel-Buffering: no</code>
+            <span class="src" data-src="src/agentscope/app/_router/_session.py:971">_session.py:971</span></li>
+        </ul>
+        <h3>一个最小 Python 客户端</h3>
+        <pre><code>import json
+
+import httpx
+
+
+async def consume(url: str, headers: dict) -&gt; None:
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream("GET", url, headers=headers) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                event = json.loads(line[6:])
+                handle(event)
+
+
+def handle(event: dict) -&gt; None:
+    match event["type"]:
+        case "TEXT_BLOCK_DELTA":
+            print(event["delta"], end="", flush=True)
+        case "REPLY_END":
+            print(f"\n[done] {event['finished_reason']}")</code></pre>
+
+        <h2 id="replay">重放与断线重连</h2>
+        <p>
+          连接建立时，服务<strong>先订阅、再回放</strong>：先拿到实时事件，再从回放日志读历史，
+          两条路径重叠的部分按 entry id 去重
+          <span class="src" data-src="src/agentscope/app/_router/_session.py:893">_session.py:893</span>。
+        </p>
+        <pre><code>GET /sessions/session-xxx/stream?agent_id=agent-xxx&amp;after=&lt;cursor&gt;</code></pre>
+        <p>
+          <code>after</code> 是回放游标，不是消息 ID。它来自消息接口返回的
+          <code>event_cursor</code>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>来源</th>
+                <th>用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>GET /sessions/{id}/messages</code> → <code>event_cursor</code></td><td>下次连 SSE 时传给 <code>after</code></td></tr>
+              <tr><td>SSE 帧里的 <code>_entry_id</code></td><td>内部去重键，<strong>不会</strong>出现在发给客户端的 payload 里</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          连接会一直保持打开，同一会话后续的多次 run 都复用同一条连接。
+          所以前端不需要每条消息重建 EventSource，只需要在断线后带游标重连。
+        </p>
+        <div class="callout tip">
+          <span class="ct">先订阅，再发消息</span>
+          <p>
+            推荐顺序是「先连 SSE，再 <code>POST /chat</code>」。这样不会漏掉第一帧；
+            即使先发了，回放日志也能补上。
+          </p>
+        </div>
+
+        <h2 id="fanout">扇出与去重</h2>
+        <p>
+          多个客户端可以同时订阅同一会话。服务端从消息总线同时做两件事：
+        </p>
+        <ol>
+          <li><strong>回放</strong>：从日志读 <code>after</code> 之后的条目
+            <span class="src" data-src="src/agentscope/app/_router/_session.py:900">_session.py:900</span></li>
+          <li><strong>实时</strong>：从订阅队列持续取新事件
+            <span class="src" data-src="src/agentscope/app/_router/_session.py:942">_session.py:942</span></li>
+        </ol>
+        <p>
+          同一条事件可能同时出现在回放和实时流里。服务端用 <code>seen_entry_ids</code>
+          去重；客户端如果自己做重连，也应保存已处理的事件 <code>id</code>，避免重复追加文本。
+        </p>
+        <p>
+          另外，团队场景下某个 worker 的 HITL 卡片会被投影到 leader 的会话流里，
+          以 <code>CustomEvent</code> 的形式出现（<code>SubagentHitlProjector</code>），
+          前端按 <code>name</code> 分派即可。
+        </p>
+
+        <h2 id="messages">消息历史：游标分页</h2>
+        <p>
+          <code>GET /sessions/{id}/messages</code>
+          <span class="src" data-src="src/agentscope/app/_router/_session.py:591">_session.py:591</span>
+          用<strong>消息 ID 游标</strong>，不是 offset：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>参数</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>before</code><span class="src" data-src="src/agentscope/app/_router/_session.py:594">_session.py:594</span></td><td>上一页最后一条消息的 ID；省略拿最新一页</td></tr>
+              <tr><td><code>limit</code><span class="src" data-src="src/agentscope/app/_router/_session.py:612">_session.py:612</span></td><td>1–200，默认 50</td></tr>
+              <tr><td><code>offset</code></td><td><strong>已废弃</strong>，永远被忽略</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>返回四个字段：</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>messages</code></td><td>这一页消息</td></tr>
+              <tr><td><code>event_cursor</code></td><td>SSE 的 <code>after</code> 游标；只在请求最新一页时返回</td></tr>
+              <tr><td><code>is_running</code></td><td>会话是否被 worker 持有</td></tr>
+              <tr><td><code>has_more</code></td><td>是否还有更早的消息</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct">用 <code>before</code> 时拿不到 <code>event_cursor</code></span>
+          <p>
+            只有不带 <code>before</code> / <code>offset</code> 的「最新一页」请求才会读检查点游标
+            <span class="src" data-src="src/agentscope/app/_router/_session.py:659">_session.py:659</span>。
+            翻历史时它返回 <code>None</code>，这是设计行为。
+          </p>
+        </div>
+
+        <h2 id="status">状态探测：四个值</h2>
+        <p>
+          <code>GET /sessions/{id}/status</code>
+          <span class="src" data-src="src/agentscope/app/_router/_session.py:695">_session.py:695</span>
+          返回 <code>SessionStatus</code>
+          <span class="src" data-src="src/agentscope/app/_service/_session.py:61">_session.py:61</span>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>值</th>
+                <th>含义</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>running</code><span class="src" data-src="src/agentscope/app/_service/_session.py:92">_session.py:92</span></td><td>某个 worker 持有运行锁</td></tr>
+              <tr><td><code>idle</code><span class="src" data-src="src/agentscope/app/_service/_session.py:93">_session.py:93</span></td><td>没在跑，也没有挂起工具调用</td></tr>
+              <tr><td><code>awaiting_permission</code><span class="src" data-src="src/agentscope/app/_service/_session.py:94">_session.py:94</span></td><td>没在跑，但上下文尾部有工具调用在等用户确认</td></tr>
+              <tr><td><code>awaiting_external_result</code><span class="src" data-src="src/agentscope/app/_service/_session.py:95">_session.py:95</span></td><td>没在跑，但外部执行工具在等结果</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          优先级：先看运行锁，只有没被任何 worker 持有时，才根据持久化上下文尾部判断挂起类型。
+          前端只需要渲染一个状态指示器，不用自己组合多个布尔值。
+        </p>
+        <pre><code>GET /sessions/session-xxx/status?agent_id=agent-xxx
+
+→ {
+  "session_id": "session-xxx",
+  "status": "awaiting_permission"
+}</code></pre>
+
+        <h2 id="interrupt">中断与续接</h2>
+        <p>
+          <code>POST /sessions/{id}/interrupt</code>
+          <span class="src" data-src="src/agentscope/app/_router/_session.py:426">_session.py:426</span>
+          中断正在运行或 HITL 暂停的 run。返回 202，实际取消是异步的：
+        </p>
+        <pre><code>POST /sessions/session-xxx/interrupt?agent_id=agent-xxx
+X-User-ID: alice
+
+→ 202 {"session_id": "session-xxx"}</code></pre>
+        <p>
+          中断后，会话会回到可以接受下一次输入的状态。续接有两条路：
+        </p>
+        <ul>
+          <li>HITL：<code>POST /chat</code>，<code>input</code> 传 <code>UserConfirmResultEvent</code> / <code>ExternalExecutionResultEvent</code></li>
+          <li>普通继续：<code>input: null</code>，从当前状态继续</li>
+        </ul>
+        <div class="callout warn">
+          <span class="ct">202 不代表已经停</span>
+          <p>
+            中断要先广播取消、等运行锁释放。刚返回 202 时再查
+            <code>/status</code>，可能仍显示 <code>running</code>。前端轮询到
+            <code>idle</code> / <code>awaiting_*</code> 再允许下一次发送。
+          </p>
+        </div>
+
+        <h2 id="agui">AG-UI 协议适配</h2>
+        <p>
+          原生流输出的是 AgentScope 的 <code>AgentEvent</code>。如果前端用的是
+          AG-UI 协议，装一个协议中间件即可：
+        </p>
+        <pre><code>from fastapi.middleware import Middleware
+from agentscope.app import create_app
+from agentscope.app.middleware import AGUIProtocolMiddleware
+
+app = create_app(
+    storage=storage,
+    message_bus=message_bus,
+    workspace_manager=workspace_manager,
+    extra_middlewares=[
+        Middleware(AGUIProtocolMiddleware),
+    ],
+)</code></pre>
+        <p>
+          <code>ProtocolMiddlewareBase</code>
+          <span class="src" data-src="src/agentscope/app/middleware/_protocol/_base.py:17">_base.py:17</span>
+          拦截会话流端点的 <code>StreamingResponse</code>，把每帧反序列化回
+          <code>AgentEvent</code>，调用 <code>_convert_to_protocol()</code>
+          转成目标格式再重新序列化。
+        </p>
+        <p>
+          <code>AGUIProtocolMiddleware</code>
+          <span class="src" data-src="src/agentscope/app/middleware/_protocol/_agui.py:44">_agui.py:44</span>
+          内置了到 AG-UI 事件的映射。要接别的协议，继承
+          <code>ProtocolMiddlewareBase</code> 并实现一个转换方法即可。
+        </p>
+        <div class="callout warn">
+          <span class="ct">装了协议中间件，帧格式就变了</span>
+          <p>
+            前端必须按目标协议解析，不能再用原生 <code>type</code> 字段。
+            两条流不要混用同一个客户端。
+          </p>
+        </div>
+
+        <h2 id="contract">前端契约：五条硬规则</h2>
+        <ol>
+          <li>
+            <strong>按 <code>reply_id</code> 隔离</strong>：一条会话流里可能混着多次 run，
+            甚至团队成员的回复。别把所有 <code>delta</code> 拼到一个字符串。
+          </li>
+          <li>
+            <strong>按 <code>block_id</code> / <code>tool_call_id</code> 定位块</strong>：
+            <code>TEXT_BLOCK_START</code> 建块，<code>DELTA</code> 累加，
+            <code>END</code> 收尾。找不到块就跳过，别抛错。
+          </li>
+          <li>
+            <strong>忽略心跳与未知类型</strong>：<code>:</code> 开头的帧不是数据；
+            新事件类型要能静默跳过。
+          </li>
+          <li>
+            <strong>去重</strong>：重连时回放与实时可能重叠，按事件 <code>id</code> 或
+            <code>_entry_id</code> 去重。
+          </li>
+          <li>
+            <strong>状态驱动 UI</strong>：用 <code>/status</code> 的四个值决定
+            「正在输入」「等待确认」「可发送」，不要靠猜。
+          </li>
+        </ol>
+        <p>
+          这些规则和 03 章的 <code>Msg.append_event()</code> 是同一套语义。
+          服务端持久化用的也是它，所以前端 reducer 与后端重建结果应当一致。
+        </p>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>建会话</td><td><code>POST /sessions</code></td></tr>
+              <tr><td>发消息</td><td><code>POST /chat</code></td></tr>
+              <tr><td>订阅事件</td><td><code>GET /sessions/{id}/stream</code></td></tr>
+              <tr><td>断线重连</td><td><code>.../stream?after=&lt;event_cursor&gt;</code></td></tr>
+              <tr><td>翻历史</td><td><code>GET /sessions/{id}/messages?before=&lt;msg_id&gt;</code></td></tr>
+              <tr><td>查状态</td><td><code>GET /sessions/{id}/status</code></td></tr>
+              <tr><td>中断</td><td><code>POST /sessions/{id}/interrupt</code></td></tr>
+              <tr><td>续接 HITL</td><td><code>POST /chat</code> + <code>UserConfirmResultEvent</code></td></tr>
+              <tr><td>换协议</td><td><code>extra_middlewares=[Middleware(AGUIProtocolMiddleware)]</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">把 <code>after</code> 当成消息 ID</span>
+          <p>
+            <code>after</code> 是事件回放游标，来自消息接口的 <code>event_cursor</code>。
+            传消息 ID 可能从错误的位置开始回放。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">用 <code>offset</code> 翻页</span>
+          <p>
+            <code>offset</code> 已废弃且永远被忽略。用 <code>before</code> +
+            <code>has_more</code> 做游标分页。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">重连后文本重复</span>
+          <p>
+            回放和实时流会重叠。按事件 <code>id</code> 去重；如果只按文本拼接，
+            重连后会出现整段重复。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">反代缓冲 SSE</span>
+          <p>
+            服务端已经带 <code>X-Accel-Buffering: no</code>，但 nginx 仍需
+            <code>proxy_buffering off</code>，否则用户看到的是「一次性全部出现」。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">中断后立刻再发</span>
+          <p>
+            202 只表示「已请求取消」。运行锁还没释放时再发会 409。
+            等 <code>/status</code> 变成非 <code>running</code>。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">先建 SSE，再发 <code>POST /chat</code></span>
+          <p>
+            这样不会漏掉第一帧。即使顺序反了，回放日志也能补上，但前端逻辑会简单很多。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">用 <code>is_running</code> 做发送按钮</span>
+          <p>
+            消息接口同时返回 <code>is_running</code>，比额外查一次
+            <code>/status</code> 更省往返。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li>为什么 SSE 连接可以跨多次 <code>POST /chat</code> 保持不关？</li>
+          <li><code>event_cursor</code> 和消息 ID 有什么区别？各自用在哪？</li>
+          <li>四个 <code>SessionStatus</code> 值分别对应界面的什么状态？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>用 <code>curl -N</code> 订阅会话流，再另开终端发 <code>POST /chat</code>，观察帧顺序。</li>
+          <li>把连接断开，记录最后的 <code>event_cursor</code>，带 <code>after</code> 重连，确认没有丢帧。</li>
+          <li>用 <code>before</code> 翻两页消息，确认 <code>has_more</code> 与 <code>event_cursor</code> 的行为。</li>
+          <li>触发一个需要确认的工具，查 <code>/status</code> 是否为 <code>awaiting_permission</code>，再发确认。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          会话与 SSE 把前后端契约讲完了。下一章 <strong>17 Agent Team</strong> 进入服务层的多智能体：
+          Leader 派生 Worker、任务分派与回收。
+          17 章尚未发布前，可以先回 <a href="09-pipeline.html">09 流水线</a>
+          复习 SDK 层的 TeamPipeline。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
