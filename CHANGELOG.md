@@ -2,6 +2,17 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.9.0 — 2026-11-06
+
+新增第 09 章「流水线」，进入多智能体编排。
+
+- **统一接口**：`PipelineProtocol` 只要求一个 `reply_stream`，Agent 天然满足，可互相替换。
+- **GoalPipeline**：执行者 + 验证者，`pass` / `fail` / `impossible` 三种判定，`max_iters` 与 `max_retries` 两套预算。
+- **TeamPipeline**：队长 + `TeamMember`，`TeamAssign` 外部工具，成员描述驱动分派。
+- **并发边界**：不同成员并发、同一成员串行、结果按调用顺序回传。
+- **事件**：单一 `reply_stream` 用 `reply_id` 区分发言者，HITL 按 `reply_id` 路由。
+- **选型**：Goal / Team / 单 Agent / SOP / Agent Service 的适用边界。
+
 ## v0.8.0 — 2026-11-06
 
 新增第 08 章「权限与 HITL」，把「工具能不能执行」讲成可配置、可暂停、可恢复的流程。

@@ -1,0 +1,608 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 流水线：PipelineProtocol 统一接口、GoalPipeline 执行者与验证者循环、TeamPipeline 队长分派与成员并发、统一事件出口与 HITL 恢复。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="09 流水线：Pipeline、GoalPipeline 与 TeamPipeline · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="PipelineProtocol 统一接口、GoalPipeline 执行者与验证者循环、TeamPipeline 队长分派与成员并发、统一事件出口与 HITL 恢复。" />
+    <title>09 流水线：Pipeline、GoalPipeline 与 TeamPipeline · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="09-pipeline" data-root="..">
+    <main>
+      <article class="article">
+        <h1>09 · 流水线</h1>
+        <p class="lede">
+          08 章之前，所有 Agent 都是「你问它答」。从这一章开始，多个 Agent 要协作。
+          流水线的价值不是「让 Agent 互相聊天」，而是<strong>把谁先谁后、失败怎么退回、最多几轮固定下来</strong>，
+          对外仍然只暴露一个 <code>reply_stream</code>。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>解释 <code>PipelineProtocol</code> 为什么只需要一个方法，以及 Agent 为什么天然满足它</li>
+          <li>用 <code>GoalPipeline</code> 搭一个「执行 → 验证 → 退回重做」的闭环</li>
+          <li>用 <code>TeamPipeline</code> 让队长把任务分派给不同专长的成员，并知道并发边界</li>
+          <li>用 <code>reply_id</code> 从统一事件流里区分是哪个 Agent 在说话</li>
+        </ul>
+
+        <h2 id="why">先说为什么：多 Agent 不该靠「互相喊话」</h2>
+        <p>
+          如果让几个 Agent 自由对话，问题会立刻出现：谁先说话？说到什么时候停？A 说完了 B 没听懂怎么办？
+          某个工具要用户确认，整条链路停在哪？没有固定编排，这些问题只能靠提示词祈祷。
+        </p>
+        <p>流水线把三件事固定下来：</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>职责</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>固化运行逻辑</td>
+                <td>谁先谁后、什么条件退回、最多几轮，构造时确定，不交给模型临场决定</td>
+              </tr>
+              <tr>
+                <td>统一事件出口</td>
+                <td>内部所有 Agent 的事件从同一个 <code>reply_stream</code> 流出</td>
+              </tr>
+              <tr>
+                <td>处理人机交互</td>
+                <td>任一 Agent 停在工具授权上时，流水线结束事件流；恢复时按 <code>reply_id</code> 送回被挂起的那一个</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          AgentScope 目前有两种实现：<code>GoalPipeline</code> 与 <code>TeamPipeline</code>。
+          流水线模块仍标记为实验性，接口可能在后续版本调整。
+        </p>
+
+        <h2 id="base">PipelineProtocol：和 Agent 同一个入口</h2>
+        <p>
+          <code>PipelineProtocol</code>
+          <span class="src" data-src="src/agentscope/pipeline/_base.py:15">_base.py:15</span>
+          只声明了一个方法：
+        </p>
+        <pre><code>class PipelineProtocol(Protocol):
+    def reply_stream(
+        self,
+        inputs: Msg
+        | list[Msg]
+        | UserConfirmResultEvent
+        | UserInterruptEvent
+        | ExternalExecutionResultEvent,
+    ) -&gt; AsyncGenerator[AgentEvent | Msg, None]:
+        ...</code></pre>
+        <p>
+          注意它是普通 <code>def</code>，返回异步生成器，而不是 <code>async def</code>
+          <span class="src" data-src="src/agentscope/pipeline/_base.py:18">_base.py:18</span>。
+          因为调用方是「调用它然后 <code>async for</code>」，不是「await 它」。
+        </p>
+        <p>
+          这个设计带来一个很实用的结果：<strong>Agent 本身就是「只有一个成员」的流水线</strong>。
+          凡是接受 Agent 的地方，都能直接传流水线：
+        </p>
+        <pre><code>async def watch(target, inputs) -&gt; None:
+    async for event in target.reply_stream(inputs):
+        print(event)
+
+
+async def main() -&gt; None:
+    await watch(agent, msg)   # 单个 Agent
+    await watch(pipe, msg)    # 流水线</code></pre>
+        <p>
+          终端调试器就是这样放宽的：<code>launch_console(agent=pipe)</code> 不需要任何适配代码。
+        </p>
+
+        <h2 id="goal">GoalPipeline：执行者 + 验证者</h2>
+        <p>
+          <code>GoalPipeline</code>
+          <span class="src" data-src="src/agentscope/pipeline/_goal_pipeline.py:55">_goal_pipeline.py:55</span>
+          的循环很固定：执行者产出，验证者判定，不通过就带着理由退回重做。
+        </p>
+        <pre><code>        ┌────────── 不通过：带着理由退回 ──────────┐
+        │                                        │
+        ▼                                        │
+输入 ─▶ 执行者 ── 产出 ──▶ 验证者 ──────────────┘
+                            │
+                            └── 通过 ──▶ 结束</code></pre>
+        <p>
+          构造参数
+          <span class="src" data-src="src/agentscope/pipeline/_goal_pipeline.py:59">_goal_pipeline.py:59</span>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>参数</th>
+                <th>默认</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>executor</code></td>
+                <td>必填</td>
+                <td>干活的 Agent</td>
+              </tr>
+              <tr>
+                <td><code>verifier</code></td>
+                <td>必填</td>
+                <td>判定的 Agent</td>
+              </tr>
+              <tr>
+                <td><code>verifier_reset_context</code><span class="src" data-src="src/agentscope/pipeline/_goal_pipeline.py:63">_goal_pipeline.py:63</span></td>
+                <td><code>True</code></td>
+                <td>每次 fail 后清空验证者上下文，避免被上一轮判词带偏</td>
+              </tr>
+              <tr>
+                <td><code>max_iters</code><span class="src" data-src="src/agentscope/pipeline/_goal_pipeline.py:64">_goal_pipeline.py:64</span></td>
+                <td><code>10</code></td>
+                <td>最多被驳回几次</td>
+              </tr>
+              <tr>
+                <td><code>max_retries</code><span class="src" data-src="src/agentscope/pipeline/_goal_pipeline.py:65">_goal_pipeline.py:65</span></td>
+                <td><code>3</code></td>
+                <td>任一方没给出合法结构化输出时，最多重问几次</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct">目标不在构造函数里</span>
+          <p>
+            构造时只给两个 Agent。目标来自第一次 <code>reply_stream</code> 的消息：
+            它既是交给执行者的任务，也是验证者对照的目标。
+          </p>
+        </div>
+        <pre><code>from agentscope.agent import Agent
+from agentscope.pipeline import GoalPipeline
+from agentscope.tool import Toolkit
+
+
+async def build_goal_pipe(workspace, model):
+    tools = await workspace.list_tools()
+
+    executor = Agent(
+        name="Executor",
+        system_prompt="You're a programmer named 'Executor'.",
+        model=model,
+        toolkit=Toolkit(tools=tools),
+        offloader=workspace,
+    )
+    verifier = Agent(
+        name="Verifier",
+        system_prompt="You're a reviewer named 'Verifier'.",
+        model=model,
+        toolkit=Toolkit(tools=tools),
+        offloader=workspace,
+    )
+
+    return GoalPipeline(
+        executor=executor,
+        verifier=verifier,
+        max_iters=5,
+    )</code></pre>
+        <p>
+          两个 Agent 共享同一个工作区很关键：验证者要能真的去读执行者写出的文件、跑测试，
+          而不是只听执行者说「我做完了」。
+        </p>
+
+        <h2 id="goal-loop">目标循环：pass / fail / impossible 与两套预算</h2>
+        <p>执行者和验证者都通过结构化输出交付结果：</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>角色</th>
+                <th>字段</th>
+                <th>含义</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>执行者</td>
+                <td><code>report</code><span class="src" data-src="src/agentscope/pipeline/_goal_pipeline.py:22">_goal_pipeline.py:22</span></td>
+                <td>成果说明：文件路径、入口、运行方式</td>
+              </tr>
+              <tr>
+                <td>验证者</td>
+                <td><code>result</code><span class="src" data-src="src/agentscope/pipeline/_goal_pipeline.py:34">_goal_pipeline.py:34</span></td>
+                <td><code>pass</code> / <code>fail</code> / <code>impossible</code></td>
+              </tr>
+              <tr>
+                <td>验证者</td>
+                <td><code>message</code></td>
+                <td>未通过时说明缺什么、在哪改</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>判定后的走向：</p>
+        <ul>
+          <li><code>pass</code> 或 <code>impossible</code> → 结束<span class="src" data-src="src/agentscope/pipeline/_goal_pipeline.py:334">_goal_pipeline.py:334</span></li>
+          <li><code>fail</code> → <code>message</code> 包进提醒，交给执行者重做<span class="src" data-src="src/agentscope/pipeline/_goal_pipeline.py:357">_goal_pipeline.py:357</span></li>
+          <li>被驳回次数达到 <code>max_iters</code> → 停止，哪怕没通过<span class="src" data-src="src/agentscope/pipeline/_goal_pipeline.py:351">_goal_pipeline.py:351</span></li>
+        </ul>
+        <h3>只有「判决失败」消耗 max_iters</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>情况</th>
+                <th>含义</th>
+                <th>消耗哪套预算</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>验证者判 <code>fail</code></td>
+                <td>活儿确实没做好</td>
+                <td><code>max_iters</code></td>
+              </tr>
+              <tr>
+                <td>任一方没给出合法结构化输出</td>
+                <td>模型没按要求调工具，是故障不是判决</td>
+                <td><code>max_retries</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          这个区分很重要：把「模型忘了调 <code>GenerateStructuredOutput</code>」也算进驳回次数，
+          执行者会平白少几次机会。
+        </p>
+        <p>
+          另外，迭代预算记在流水线实例上
+          <span class="src" data-src="src/agentscope/pipeline/_goal_pipeline.py:90">_goal_pipeline.py:90</span>，
+          不是 <code>reply_stream</code> 的局部变量。所以中途因为 HITL 恢复，不会把已经用掉的次数清零。
+        </p>
+
+        <h2 id="team">TeamPipeline：队长 + 成员</h2>
+        <p>
+          <code>TeamPipeline</code>
+          <span class="src" data-src="src/agentscope/pipeline/_team_pipeline.py:110">_team_pipeline.py:110</span>
+          只固化「谁能被分派、结果回到哪里」，分派给谁、分派几次由队长自己决定。
+        </p>
+        <pre><code>              ┌── TeamAssign(member="Researcher") ──▶ Researcher ──┐
+              │                                                    │
+输入 ─▶ 队长 ┤                                                    ├──▶ 结果 ─▶ 队长 ─▶ 输出
+              │                                                    │
+              └── TeamAssign(member="Coder") ───────▶ Coder ───────┘</code></pre>
+        <p>
+          构造参数
+          <span class="src" data-src="src/agentscope/pipeline/_team_pipeline.py:130">_team_pipeline.py:130</span>：
+          <code>leader</code>、<code>members</code>、<code>reset_members=True</code>。
+          成员用 <code>TeamMember</code>
+          <span class="src" data-src="src/agentscope/pipeline/_team_pipeline.py:37">_team_pipeline.py:37</span>
+          描述：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>agent</code><span class="src" data-src="src/agentscope/pipeline/_team_pipeline.py:43">_team_pipeline.py:43</span></td>
+                <td>成员 Agent；它的 <code>name</code> 就是队长分派时引用的名字</td>
+              </tr>
+              <tr>
+                <td><code>description</code><span class="src" data-src="src/agentscope/pipeline/_team_pipeline.py:46">_team_pipeline.py:46</span></td>
+                <td>擅长什么、何时分派、会交回什么，会写进分派工具说明</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          成员名字必须互不相同，也不能和队长同名，否则构造时直接抛
+          <code>ValueError</code>
+          <span class="src" data-src="src/agentscope/pipeline/_team_pipeline.py:149">_team_pipeline.py:149</span>。
+        </p>
+        <pre><code>from agentscope.agent import Agent
+from agentscope.pipeline import TeamMember, TeamPipeline
+from agentscope.tool import Toolkit
+
+
+leader = Agent(
+    name="Leader",
+    system_prompt="You're a team leader named 'Leader'.",
+    model=model,
+    toolkit=Toolkit(),          # 必须带工具箱，流水线会注册 TeamAssign
+)
+
+pipe = TeamPipeline(
+    leader=leader,
+    members=[
+        TeamMember(
+            agent=researcher,
+            description="Investigates a question and reports findings.",
+        ),
+        TeamMember(
+            agent=coder,
+            description="Writes and runs code in the workspace.",
+        ),
+    ],
+    reset_members=True,
+)</code></pre>
+
+        <h2 id="assign">分派：TeamAssign 与结果回传</h2>
+        <p>
+          第一次运行时，流水线会往队长的工具箱注册一个外部工具
+          <code>TeamAssign</code>
+          <span class="src" data-src="src/agentscope/pipeline/_team_pipeline.py:51">_team_pipeline.py:51</span>。
+          它的参数只有两个：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>参数</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>member</code></td>
+                <td>成员名字，枚举限定在 <code>members</code> 里<span class="src" data-src="src/agentscope/pipeline/_team_pipeline.py:70">_team_pipeline.py:70</span></td>
+              </tr>
+              <tr>
+                <td><code>prompt</code></td>
+                <td>完整任务。成员看不到队长上下文，需要的信息都要写进来</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <code>TeamAssign</code> 自己不执行，<code>is_external_tool=True</code>
+          <span class="src" data-src="src/agentscope/pipeline/_team_pipeline.py:57">_team_pipeline.py:57</span>；
+          流水线拦截它产生的 <code>RequireExternalExecutionEvent</code>，改去运行对应成员。
+          分派本身始终放行
+          <span class="src" data-src="src/agentscope/pipeline/_team_pipeline.py:89">_team_pipeline.py:89</span>，
+          但成员自己的工具仍走各自的权限检查。
+        </p>
+        <h3>队长只看到最终回复</h3>
+        <p>
+          成员在自己的上下文里跑完，最终回复的文本与数据块被包装成 <code>TeamAssign</code> 的工具结果交回队长。
+          队长看不到成员中间的推理与工具调用，上下文不会被成员的过程撑满。
+        </p>
+        <p>成员回复的结束原因决定工具结果状态：</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>结束原因</th>
+                <th>工具结果状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>completed</code> / <code>exceed_max_iters</code></td>
+                <td><code>SUCCESS</code></td>
+              </tr>
+              <tr>
+                <td><code>interrupted</code></td>
+                <td><code>INTERRUPTED</code></td>
+              </tr>
+              <tr>
+                <td><code>error</code></td>
+                <td><code>ERROR</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>并发边界</h3>
+        <ul>
+          <li>同一轮里，分派给<strong>不同成员</strong>的任务并发运行</li>
+          <li>分派给<strong>同一成员</strong>的多个任务按调用顺序依次运行</li>
+          <li>成员之间不直接通信，结果总是回到队长</li>
+          <li>结果按队长调用的顺序排好，而不是按完成时间</li>
+        </ul>
+        <p>
+          实现上先按成员分组，每组内部串行，组之间用 <code>asyncio.gather</code> 并发
+          <span class="src" data-src="src/agentscope/pipeline/_team_pipeline.py:284">_team_pipeline.py:284</span>；
+          最后按原始调用顺序排序再交回队长
+          <span class="src" data-src="src/agentscope/pipeline/_team_pipeline.py:374">_team_pipeline.py:374</span>。
+        </p>
+        <div class="callout warn">
+          <span class="ct"><code>reset_members</code> 默认是 <code>True</code></span>
+          <p>
+            同一次队长回复内，队长可以就同一件事追问成员；但队长回复结束后，
+            所有成员的上下文与摘要会被清空，下一次回复从头开始。要让成员跨回复保留记忆，
+            显式设 <code>reset_members=False</code>。
+          </p>
+        </div>
+
+        <h2 id="events">统一事件出口：reply_id 与 HITL</h2>
+        <p>
+          一条流水线只有一个 <code>reply_stream</code>，内部所有 Agent 的事件混在一起。
+          区分「谁在说话」靠 <code>reply_id</code>：它等于该 Agent 的
+          <code>agent.state.reply_id</code>。
+        </p>
+        <pre><code>async def run(pipe, msg) -&gt; None:
+    async for event in pipe.reply_stream(msg):
+        if hasattr(event, "reply_id"):
+            print(event.reply_id, event.type)</code></pre>
+        <h3>HITL 怎么路由</h3>
+        <p>
+          任一 Agent 停在工具授权上时，流水线<strong>结束事件流</strong>，不挂起、不轮询。
+          恢复时把结果事件喂回去，流水线按 <code>reply_id</code> 找到被挂起的那一个：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>流水线</th>
+                <th>路由规则</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>GoalPipeline</code></td>
+                <td>比 <code>reply_id</code> 是执行者还是验证者，交给对应方<span class="src" data-src="src/agentscope/pipeline/_goal_pipeline.py:175">_goal_pipeline.py:175</span></td>
+              </tr>
+              <tr>
+                <td><code>TeamPipeline</code></td>
+                <td>不是队长的 <code>reply_id</code> 就交给挂起的成员；其余成员照常跑完，已完成结果先交回队长<span class="src" data-src="src/agentscope/pipeline/_team_pipeline.py:229">_team_pipeline.py:229</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <pre><code>async def resume(pipe, confirm_event) -&gt; None:
+    async for event in pipe.reply_stream(confirm_event):
+        ...</code></pre>
+        <p>
+          <code>UserInterruptEvent</code> 是放弃：被挂起的 Agent 关掉未决工具调用，整条流水线随之结束。
+        </p>
+
+        <h2 id="compare">怎么选：Goal vs Team vs 单 Agent</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>场景</th>
+                <th>用什么</th>
+                <th>理由</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>一个 Agent 就能完成</td>
+                <td><code>Agent</code></td>
+                <td>流水线不带来额外能力，只增加一层</td>
+              </tr>
+              <tr>
+                <td>有明确验收标准，需要反复改</td>
+                <td><code>GoalPipeline</code></td>
+                <td>验证者提供质量闸门，失败自动退回</td>
+              </tr>
+              <tr>
+                <td>任务需要不同专长，分派策略由模型决定</td>
+                <td><code>TeamPipeline</code></td>
+                <td>队长按成员描述决定给谁，成员各用各的工具</td>
+              </tr>
+              <tr>
+                <td>流程固定、步骤多、需要人工验收点</td>
+                <td>SOP / Plan（10 章）</td>
+                <td>任务清单与里程碑由框架维护，不是固定 Agent 图</td>
+              </tr>
+              <tr>
+                <td>部署成服务、多租户、团队工具</td>
+                <td>Agent Service / Agent Team（15、17 章）</td>
+                <td>那是服务层编排，不是 SDK 内的流水线</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>跑目标流水线</td><td><code>GoalPipeline(executor=..., verifier=..., max_iters=5)</code></td></tr>
+              <tr><td>让验证者每轮重新看</td><td><code>verifier_reset_context=True</code>（默认）</td></tr>
+              <tr><td>组装团队</td><td><code>TeamPipeline(leader=..., members=[TeamMember(...)])</code></td></tr>
+              <tr><td>限制成员跨回复记忆</td><td><code>reset_members=True</code>（默认）</td></tr>
+              <tr><td>统一消费事件</td><td><code>pipe.reply_stream(msg)</code></td></tr>
+              <tr><td>区分事件来源</td><td>看 <code>event.reply_id</code></td></tr>
+              <tr><td>恢复 HITL</td><td><code>pipe.reply_stream(confirm_event)</code></td></tr>
+              <tr><td>终端调试</td><td><code>launch_console(agent=pipe)</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">GoalPipeline 构造时不传目标</span>
+          <p>
+            目标来自第一次 <code>reply_stream</code> 的消息。如果你在构造函数里找一个
+            <code>goal=</code> 参数，会找不到；把任务写成第一条用户消息即可。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">把 <code>max_retries</code> 和 <code>max_iters</code> 混了</span>
+          <p>
+            前者是「结构化输出没生成对，重问几次」；后者是「验证者判 fail，允许重做几次」。
+            调大 <code>max_retries</code> 不会让执行者多几次机会。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">验证者和执行者不共享工作区</span>
+          <p>
+            验证者只能看到执行者写在 <code>report</code> 里的自述。如果它没有同一套文件工具与工作区，
+            所谓「验证」就退化成「听执行者汇报」。让两者共享 <code>LocalWorkspace</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">Team 的成员描述写得太泛</span>
+          <p>
+            <code>TeamMember.description</code> 会写进 <code>TeamAssign</code> 的工具说明，是队长决定分派给谁的主要依据。
+            写「擅长写代码」不如写「修改工作区里的 Python 文件并运行测试，返回测试结果」。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">用 <code>reply_id</code> 做前端分组</span>
+          <p>
+            流水线事件是混流的。前端按 <code>reply_id</code> 分组成「执行者」「验证者」或「Leader / Researcher」，
+            比按事件到达顺序猜可靠得多。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li><code>GoalPipeline</code> 里验证者判 <code>impossible</code>，会退回重做吗？会消耗 <code>max_iters</code> 吗？</li>
+          <li><code>TeamPipeline</code> 同一轮里分派给同一个成员两次，会并发吗？结果顺序怎么定？</li>
+          <li>流水线满足 <code>PipelineProtocol</code>，这对「把 Agent 换成流水线」有什么实际好处？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>搭一个 <code>GoalPipeline</code>：执行者写一个排序函数，验证者跑测试并判定 pass / fail。</li>
+          <li>把 <code>max_iters</code> 设为 1，故意让验证者第一次判 fail，观察流水线何时停止。</li>
+          <li>搭一个 <code>TeamPipeline</code>，让队长把「查资料」和「写代码」分给两个成员，观察事件流里的 <code>reply_id</code> 切换。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          流水线的顺序是开发者固定的。下一章 <strong>10 计划模式与 SOP</strong> 换一种思路：
+          让模型自己维护任务清单，或按预先定义的步骤逐个验收。
+          10 章尚未发布前，可以先回 <a href="08-permission-hitl.html">08 权限与 HITL</a>
+          复习流水线里 HITL 的路由规则。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
