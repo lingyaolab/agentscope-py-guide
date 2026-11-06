@@ -1,0 +1,831 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 可观测性：TracingMiddleware、OpenTelemetry span 树、GenAI 语义属性、流式与 HITL 追踪、Agent Service 接入、Token 统计与成本计算、ReplyBudgetControlMiddleware、隐私与采样。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="21 可观测性：追踪、Token 与成本 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="TracingMiddleware、span 树与 GenAI 属性、Token 来源、成本计算、预算兜底、隐私与采样。" />
+    <title>21 可观测性：追踪、Token 与成本 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="21-observability" data-root="..">
+    <main>
+      <article class="article">
+        <h1>21 · 可观测性</h1>
+        <p class="lede">
+          前 20 章把 Agent 从能跑到能上线都讲完了，但上线之后才是真正的问题开始：
+          这次回复为什么慢？刚才那轮花了多少 token？工具报错在哪一层？
+          这一章讲 AgentScope 内建的 OpenTelemetry 追踪，以及怎么把 token 变成成本。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>注册 <code>TracerProvider</code>，把 <code>TracingMiddleware</code> 装到 Agent 上</li>
+          <li>看懂一次 reply 产生的 span 树，知道每层 span 来自哪个 hook</li>
+          <li>从 <code>ModelCallEndEvent</code> 或 <code>Msg.usage</code> 里取 token，自己算成本</li>
+          <li>用 <code>ReplyBudgetControlMiddleware</code> 给单次 reply 设上限</li>
+          <li>判断哪些内容会进 span，以及采样到底能省什么</li>
+        </ul>
+
+        <h2 id="why">先说为什么：日志回答不了「慢在哪」</h2>
+        <p>
+          最原始的观测是 <code>print</code>。它能告诉你「开始了」「结束了」，但回答不了下面这些问题：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>线上问题</th>
+                <th>日志能给什么</th>
+                <th>追踪能给什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>这轮回复为什么 40 秒？</td>
+                <td>开始和结束时间</td>
+                <td>每次模型调用、每次工具调用各占多少毫秒</td>
+              </tr>
+              <tr>
+                <td>第 3 轮工具为什么失败？</td>
+                <td>一行报错文本</td>
+                <td>失败 span 的入参、结果、异常与父级 reply</td>
+              </tr>
+              <tr>
+                <td>这一轮花了多少 token？</td>
+                <td>要自己拼日志</td>
+                <td>每个 <code>chat</code> span 带 input / output / cache token</td>
+              </tr>
+              <tr>
+                <td>同一个用户的多轮会话怎么串起来？</td>
+                <td>靠自己加 request id</td>
+                <td>所有 span 共享 conversation id（session id）</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          AgentScope 的答案不是自造一套日志格式，而是接
+          <strong>OpenTelemetry</strong> 和 GenAI 语义约定：你的采集、存储、看板都可以复用现有基础设施。
+        </p>
+
+        <h2 id="layers">三层：事件、Span、指标</h2>
+        <p>
+          AgentScope 内部其实有三类可观测信号，别混用：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>层</th>
+                <th>产生者</th>
+                <th>适合回答</th>
+                <th>生命周期</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>事件流（<code>AgentEvent</code>）</td>
+                <td>Agent 的 reply 过程</td>
+                <td>前端实时渲染、增量文本、工具进度</td>
+                <td>随流消费，不自动持久化</td>
+              </tr>
+              <tr>
+                <td>Span</td>
+                <td><code>TracingMiddleware</code></td>
+                <td>延迟拆解、调用链、错误定位、token 归属</td>
+                <td>由 OTel SDK 批量导出</td>
+              </tr>
+              <tr>
+                <td>指标 / 日志</td>
+                <td>你的应用或 OTel Collector</td>
+                <td>QPS、P95、错误率、告警</td>
+                <td>取决于你的后端</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          事件流是<strong>给用户看的</strong>，Span 是<strong>给运维看的</strong>。
+          两者都从同一轮 reply 里产生，但不要拿事件流当追踪存起来。
+        </p>
+
+        <h2 id="setup">注册 TracerProvider</h2>
+        <p>
+          OpenTelemetry 相关包已经是 AgentScope 的必装依赖，不需要额外 extras：
+          <code>opentelemetry-api</code>
+          <span class="src" data-src="pyproject.toml:36">pyproject.toml:36</span>、
+          <code>opentelemetry-sdk</code>
+          <span class="src" data-src="pyproject.toml:37">pyproject.toml:37</span>、
+          <code>opentelemetry-exporter-otlp</code>
+          <span class="src" data-src="pyproject.toml:38">pyproject.toml:38</span>。
+        </p>
+        <pre><code>from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+provider = TracerProvider()
+provider.add_span_processor(
+    BatchSpanProcessor(
+        OTLPSpanExporter(endpoint="http://localhost:4318/v1/traces"),
+    ),
+)
+trace.set_tracer_provider(provider)</code></pre>
+        <ul>
+          <li>必须在创建 Agent 之前注册，<code>set_tracer_provider</code> 只有第一次生效</li>
+          <li>4318 是 OTLP/HTTP，4317 是 OTLP/gRPC，端口和协议别配错</li>
+          <li>本地调试可以换成 <code>SimpleSpanProcessor(ConsoleSpanExporter())</code>，直接打印到终端</li>
+          <li>生产环境用 <code>BatchSpanProcessor</code>，避免每次调用都同步发网络请求</li>
+        </ul>
+        <div class="callout tip">
+          <span class="ct">AgentScope 只负责产生 span</span>
+          <p>
+            导出到 Jaeger、Tempo、Langfuse、云厂商 APM 都由 OTel 生态决定。
+            AgentScope 不绑定任何后端。
+          </p>
+        </div>
+
+        <h2 id="install">装上 TracingMiddleware</h2>
+        <p>
+          <code>TracingMiddleware</code>
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_trace.py:117">_trace.py:117</span>
+          只有三个 hook：
+          <code>on_reply</code>
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_trace.py:137">_trace.py:137</span>、
+          <code>on_model_call</code>
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_trace.py:259">_trace.py:259</span>、
+          <code>on_acting</code>
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_trace.py:312">_trace.py:312</span>，
+          正好对应 Agent、模型、工具三层。
+        </p>
+        <pre><code>from agentscope.agent import Agent
+from agentscope.middleware import TracingMiddleware
+
+agent = Agent(
+    name="assistant",
+    system_prompt="You are a helpful assistant.",
+    model=model,
+    toolkit=toolkit,
+    middlewares=[TracingMiddleware()],
+)</code></pre>
+        <p>
+          tracer 的名字固定为 <code>agentscope</code>，版本取当前包版本
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_setup.py:11">_setup.py:11</span>，
+          所以在后端按 <code>service.name</code> / instrumentation scope 过滤时很好找。
+        </p>
+        <p>
+          如果没注册真正的 SDK provider，每个 hook 会直接短路到 <code>next_handler</code>
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_trace.py:59">_trace.py:59</span>，
+          不建 span、不算属性，几乎零开销。这个判断每次 hook 都会做一次。
+        </p>
+        <div class="callout tip">
+          <span class="ct">放在中间件列表第一位</span>
+          <p>
+            洋葱式中间件里，列表第一个在最外层。把 <code>TracingMiddleware</code> 放最前，
+            reply span 才能包住后面的所有中间件与 ReAct 轮次。
+          </p>
+        </div>
+
+        <h2 id="spans">Span 树：一次 reply 长什么样</h2>
+        <p>
+          一次 reply 会产出下面这棵树（工具调用几轮就有几个 <code>chat</code> /
+          <code>execute_tool</code> 兄弟节点）：
+        </p>
+        <pre><code>invoke_agent assistant                <- on_reply
+├── chat qwen-plus                    <- on_model_call，第 1 轮
+├── execute_tool search               <- on_acting，工具 1
+├── execute_tool read_file            <- on_acting，工具 2
+├── chat qwen-plus                    <- 第 2 轮
+└── execute_tool write_file           <- 工具 3</code></pre>
+        <p>
+          三类 span 的名字格式在源码里写死：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Span 名</th>
+                <th>来源</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>invoke_agent {name}</code></td>
+                <td><code>on_reply</code></td>
+                <td>整个 reply，包含所有 ReAct 轮次</td>
+              </tr>
+              <tr>
+                <td><code>chat {model}</code></td>
+                <td><code>on_model_call</code></td>
+                <td>一次底层模型 API 调用</td>
+              </tr>
+              <tr>
+                <td><code>execute_tool {tool}</code></td>
+                <td><code>on_acting</code></td>
+                <td>一次工具执行</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          所有 span 都带 <code>gen_ai.conversation.id</code>，值就是 session id；没有 session 时写
+          <code>[no_session_id]</code>
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_extractor.py:52">_extractor.py:52</span>。
+          这就是把同一用户多轮串起来的依据。
+        </p>
+        <p>
+          注意：<code>invoke_agent</code> span <strong>不汇总 token</strong>。
+          要算一轮或一个会话的总量，得自己把 <code>chat</code> span 加起来，或者监听
+          <code>ModelCallEndEvent</code>。
+        </p>
+
+        <h2 id="attrs">三类 Span 各记什么</h2>
+        <p>
+          AgentScope 用的是 OpenTelemetry 的 GenAI 语义约定
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_attributes.py:8">_attributes.py:8</span>，
+          外加几个 <code>agentscope.*</code> 扩展属性。
+        </p>
+        <h3>Agent reply span</h3>
+        <ul>
+          <li>operation name、Agent 名称、Agent 类文档字符串</li>
+          <li>输入消息（完整内容）、最终输出消息</li>
+          <li><code>agentscope.agent.reply_id</code>：HITL / 外部执行恢复时用它对上两次调用</li>
+          <li><code>agentscope.agent.hitl_pending_tools</code>：等待人工确认的工具名 JSON 列表</li>
+          <li><code>agentscope.agent.external_execution_pending_tools</code>：等待外部执行的工具名列表</li>
+          <li><code>agentscope.agent.incoming_event_type</code>：恢复时是确认结果还是外部执行结果</li>
+        </ul>
+        <p>
+          属性来自
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_extractor.py:459">_extractor.py:459</span>，
+          键名常量定义在
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_attributes.py:8">_attributes.py:8</span>
+          的 <code>SpanAttributes</code> 里。
+        </p>
+        <h3>Model call span</h3>
+        <ul>
+          <li>provider、模型名、temperature / top_p / top_k / max_tokens / penalty / stop / seed</li>
+          <li>工具定义（转成 OTel 的扁平格式）与完整输入消息</li>
+          <li>响应 id、finish reason、输入 / 输出 token、缓存 token</li>
+          <li>完整输出消息</li>
+        </ul>
+        <p>
+          请求属性在
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_extractor.py:171">_extractor.py:171</span>，
+          响应属性在
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_extractor.py:338">_extractor.py:338</span>。
+          缓存 token 只有非零才写入，键名是
+          <code>agentscope.usage.cache_input_tokens</code>
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_attributes.py:107">_attributes.py:107</span>。
+        </p>
+        <h3>Tool execution span</h3>
+        <ul>
+          <li>工具名、调用 id、入参 JSON</li>
+          <li>工具描述（如果能在 Toolkit 里查到）</li>
+          <li>工具结果（序列化成字符串）</li>
+        </ul>
+        <p>
+          请求属性在
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_extractor.py:548">_extractor.py:548</span>。
+          工具抛异常时，span 会被标成 <code>ERROR</code> 并记录异常。
+        </p>
+
+        <h2 id="streaming">流式、HITL 与外部执行</h2>
+        <p>
+          流式响应有个麻烦：调用开始时还不知道 token 和输出内容。
+          <code>on_model_call</code> 因此不直接结束 span，而是用
+          <code>end_on_exit=False</code>
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_trace.py:293">_trace.py:293</span>
+          把结束权交给一个包装器，等最后一个 chunk 到了再写响应属性。
+        </p>
+        <pre><code>with tracer.start_as_current_span(..., end_on_exit=False) as span:
+    result = await next_handler(**input_kwargs)
+    if isinstance(result, AsyncGenerator):
+        return _trace_async_generator_wrapper(result, span)  # 收尾时写属性
+    span.set_attributes(_get_llm_response_attributes(result))
+    _set_span_success_status(span)</code></pre>
+        <p>
+          流被正常消费完，包装器从最后一个 chunk 里取 usage 和内容；中途抛错，则把 span 标成
+          <code>ERROR</code> 并记录异常。
+        </p>
+        <h3>HITL：两次调用，一个 reply</h3>
+        <p>
+          人工确认会把一次 reply 拆成两次 <code>agent(...)</code> 调用。追踪里会看到两个
+          <code>invoke_agent</code> span，它们共享同一个 <code>agentscope.agent.reply_id</code>；
+          第一个带 <code>hitl_pending_tools</code>，第二个带
+          <code>incoming_event_type=user_confirm_result</code>。按 reply id 分组就能还原完整链路。
+        </p>
+        <h3>外部执行：补偿 span</h3>
+        <p>
+          工具在 Agent 进程外执行时，<code>on_acting</code> 根本看不到它。Agent 收到
+          <code>ExternalExecutionResultEvent</code> 后，<code>on_reply</code> 会为每条结果补一个
+          <code>execute_tool</code> span
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_trace.py:173">_trace.py:173</span>，
+          并标记 <code>agentscope.agent.is_external_execution=true</code>。
+        </p>
+        <div class="callout warn">
+          <span class="ct">补偿 span 的时间戳不是真实执行时间</span>
+          <p>
+            它记录的是结果<strong>收到</strong>的时刻，不是工具在外部系统真正运行的时刻。
+            想看真实耗时，得让外部系统自己上报。
+          </p>
+        </div>
+
+        <h2 id="app">在 Agent Service 里接追踪</h2>
+        <p>
+          <code>create_app</code> 不会自动安装 <code>TracingMiddleware</code>。要用
+          <code>extra_agent_middlewares</code>
+          <span class="src" data-src="src/agentscope/app/_app.py:129">_app.py:129</span>
+          传入一个工厂：
+        </p>
+        <pre><code>from agentscope.app import create_app
+from agentscope.middleware import TracingMiddleware
+
+
+async def extra_middlewares(user_id, agent_id, session_id, workspace):
+    return [TracingMiddleware()]
+
+
+app = create_app(
+    storage=storage,
+    message_bus=message_bus,
+    workspace_manager=workspace_manager,
+    extra_agent_middlewares=extra_middlewares,
+)</code></pre>
+        <p>
+          工厂在<strong>每个聊天回合</strong>被调用，参数是
+          <code>(user_id, agent_id, session_id)</code>，如果签名接受第四个参数还会多传
+          <code>workspace</code>
+          <span class="src" data-src="src/agentscope/app/_service/_chat.py:1015">_chat.py:1015</span>。
+          返回的中间件会追加到框架自带的
+          <code>InboxMiddleware</code> / <code>StateChangeMiddleware</code> /
+          <code>ToolOffloadMiddleware</code> 之后
+          <span class="src" data-src="src/agentscope/app/_service/_chat.py:1010">_chat.py:1010</span>。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>参数</th>
+                <th>作用域</th>
+                <th>典型用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>extra_middlewares</code></td>
+                <td>FastAPI / ASGI</td>
+                <td>HTTP 层追踪、请求日志、CORS</td>
+              </tr>
+              <tr>
+                <td><code>extra_agent_middlewares</code></td>
+                <td>每个聊天回合的 Agent</td>
+                <td><code>TracingMiddleware</code>、成本统计、审计</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          两者名字很像，作用层完全不同：前者包 HTTP 请求，后者包 Agent 的 reply。
+        </p>
+        <div class="callout tip">
+          <span class="ct">追踪是进程级配置，中间件是会话级装配</span>
+          <p>
+            <code>TracerProvider</code> 在进程启动时注册一次；工厂每回合返回一个新的
+            <code>TracingMiddleware</code> 也无所谓——它本身无状态，真正的开销在 span。
+          </p>
+        </div>
+
+        <h2 id="custom">自定义 Span</h2>
+        <p>
+          业务代码想在同一棵树上加节点，直接用同一个 tracer 名：
+        </p>
+        <pre><code>from opentelemetry import trace
+
+from agentscope import __version__
+
+tracer = trace.get_tracer("agentscope", __version__)
+
+
+async def enrich_profile(profile_id: str) -&gt; dict:
+    with tracer.start_as_current_span(
+        name="enrich_profile",
+        attributes={"profile.id": profile_id},
+    ) as span:
+        profile = await fetch_profile(profile_id)
+        span.set_attribute("profile.fields", len(profile))
+        return profile</code></pre>
+        <p>
+          在工具函数、模型调用回调或 Agent 生命周期内调用时，当前 span 上下文已经挂好，
+          自定义 span 会自动挂到对应的 <code>invoke_agent</code> / <code>execute_tool</code> 下面。
+        </p>
+        <div class="callout warn">
+          <span class="ct">异步生成器里别长期持有 context</span>
+          <p>
+            <code>TracingMiddleware</code> 只在推进生成器的瞬间 attach context，yield 期间不持有。
+            你自己写中间件时也要遵守这个边界，否则跨任务关闭生成器会触发 OTel detach 错误。
+          </p>
+        </div>
+
+        <h2 id="tokens">Token 从哪来</h2>
+        <p>
+          token 不是 AgentScope 估的，来自模型供应商返回的 usage。数据形状有三处：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>位置</th>
+                <th>内容</th>
+                <th>用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>ChatUsage</code><span class="src" data-src="src/agentscope/model/_model_usage.py:10">_model_usage.py:10</span></td>
+                <td>input / output / time / cache / metadata</td>
+                <td>模型层最完整的用法记录</td>
+              </tr>
+              <tr>
+                <td><code>ModelCallEndEvent</code><span class="src" data-src="src/agentscope/event/_event.py:138">_event.py:138</span></td>
+                <td>input / output / cache token、finish reason</td>
+                <td>中间件与 UI 实时统计</td>
+              </tr>
+              <tr>
+                <td><code>Msg.usage</code><span class="src" data-src="src/agentscope/message/_base.py:96">_base.py:96</span></td>
+                <td>写入上下文的 <code>Usage</code></td>
+                <td>回看某条助手消息花了多少</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          每个模型调用结束都会发出一个 <code>ModelCallEndEvent</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:1801">_agent.py:1801</span>，
+          字段就是 provider 返回的 usage
+          <span class="src" data-src="src/agentscope/event/_event.py:145">_event.py:145</span>。
+          如果 provider 没返回 usage，这里会写 0，而不是估算。
+        </p>
+        <p>
+          上下文里保存的助手消息则通过 <code>_save_to_context</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:3440">_agent.py:3440</span>
+          把 <code>ChatUsage</code> 转成 <code>Usage</code> 持久化
+          <span class="src" data-src="src/agentscope/message/_base.py:57">_base.py:57</span>。
+          注意 <code>Usage</code> 没有 <code>time</code> 字段，耗时只活在 <code>ChatUsage</code> 与 span 里。
+        </p>
+        <p>
+          另外还有 <code>model.count_tokens(messages, tools)</code>
+          <span class="src" data-src="src/agentscope/model/_base.py:379">_base.py:379</span>，
+          但它默认按「字节数 / 4」估算，只用于上下文压缩判断，<strong>不能当账单</strong>。
+        </p>
+        <p>
+          CLI / TUI 里看到的那行 <code>tokens: 1234 in / 567 out</code>
+          就是控制台渲染器读 <code>ModelCallEndEvent</code> 打的
+          <span class="src" data-src="src/agentscope/console/_renderer.py:368">_renderer.py:368</span>。
+        </p>
+
+        <h2 id="cost">成本：没有内置价目表</h2>
+        <p>
+          AgentScope 只记录 token，<strong>不记录钱</strong>。价格随供应商、模型、缓存命中、
+          批量折扣变化，框架不维护这张表。要算成本，自己乘：
+        </p>
+        <pre><code>from collections import defaultdict
+
+from agentscope.event import (
+    ModelCallEndEvent,
+    ModelCallStartEvent,
+    ReplyEndEvent,
+)
+from agentscope.middleware import MiddlewareBase
+
+# 示例价格：美元 / 百万 token，务必换成你账单页上的数字
+PRICES = {
+    "qwen-plus": {"input": 0.4, "output": 1.2},
+}
+
+
+class CostMiddleware(MiddlewareBase):
+    def __init__(self) -&gt; None:
+        self._cost: dict[str, float] = defaultdict(float)
+        self._model: dict[str, str] = {}
+
+    async def on_reply(self, agent, input_kwargs, next_handler):
+        async for event in next_handler(**input_kwargs):
+            if isinstance(event, ModelCallStartEvent):
+                self._model[event.reply_id] = event.model_name
+            elif isinstance(event, ModelCallEndEvent):
+                price = PRICES.get(self._model.get(event.reply_id, ""))
+                if price is not None:
+                    self._cost[event.reply_id] += (
+                        event.input_tokens * price["input"]
+                        + event.output_tokens * price["output"]
+                    ) / 1_000_000
+            elif isinstance(event, ReplyEndEvent):
+                cost = self._cost.pop(event.reply_id, 0.0)
+                self._model.pop(event.reply_id, None)
+                print(f"[cost] {event.reply_id}: ${cost:.6f}")
+            yield event</code></pre>
+        <div class="callout warn">
+          <span class="ct">别用 <code>agent.model.model</code> 配价</span>
+          <p>
+            模型路由中间件会在一次 reply 内替换 <code>agent.model</code>。用
+            <code>ModelCallStartEvent.model_name</code> 记录本次实际调用的模型，
+            才能对上正确单价。
+          </p>
+        </div>
+        <p>
+          三个容易算错的地方：
+        </p>
+        <ul>
+          <li><strong>缓存 token 单价不同</strong>：<code>cache_input_tokens</code> 通常打折，
+            <code>cache_creation_input_tokens</code> 通常加价，别一股脑按 input 价算</li>
+          <li><strong>钱要用 <code>Decimal</code></strong>：示例用 float 是为了短；真实计费别让浮点误差累积</li>
+          <li><strong>会话级汇总要自己映射</strong>：<code>ModelCallEndEvent</code> 只有 <code>reply_id</code>，
+            想按用户 / 会话出报表，需要把 reply 映射回 session</li>
+        </ul>
+
+        <h2 id="budget">预算兜底：单次 reply 的上限</h2>
+        <p>
+          成本看得见还不够，还要能刹车。<code>ReplyBudgetControlMiddleware</code>
+          <span class="src" data-src="src/agentscope/middleware/_budget.py:29">_budget.py:29</span>
+          给<strong>单次 reply</strong> 设一个加权 token 预算：
+        </p>
+        <pre><code>cost = input_token_weight * input_tokens
+     + output_token_weight * output_tokens</code></pre>
+        <p>累计成本达到上限后，它会做两件事：</p>
+        <ol>
+          <li>往上下文最后一条助手消息追加一个 <code>HintBlock</code>，提醒模型收尾</li>
+          <li>把下一步 <code>tool_choice</code> 强制设成 <code>none</code>，禁止继续调工具</li>
+        </ol>
+        <p>
+          如果还有结构化输出没交，则只允许调用结构化输出那个工具，而不是全禁。
+        </p>
+        <pre><code>from agentscope.agent import Agent
+from agentscope.middleware import ReplyBudgetControlMiddleware
+
+agent = Agent(
+    name="assistant",
+    system_prompt="You are a helpful assistant.",
+    model=model,
+    toolkit=toolkit,
+    middlewares=[
+        ReplyBudgetControlMiddleware(
+            token_budget=10_000,
+            input_token_weight=1.0,
+            output_token_weight=2.0,
+        ),
+    ],
+)</code></pre>
+        <ul>
+          <li><code>token_budget</code> 必填，按加权成本计算</li>
+          <li><code>output_token_weight</code> 通常设得比 input 高，因为输出更贵</li>
+          <li>累计发生在 <code>on_reply</code>
+            <span class="src" data-src="src/agentscope/middleware/_budget.py:107">_budget.py:107</span>，
+            拦截发生在 <code>on_reasoning</code>
+            <span class="src" data-src="src/agentscope/middleware/_budget.py:151">_budget.py:151</span></li>
+          <li>状态存在 <code>agent.state.middle_context</code>，所以同一个中间件实例可以给多个 Agent 共用</li>
+        </ul>
+        <div class="callout warn">
+          <span class="ct">文档说「reply 结束清理」，源码是「下一次 reply 开始时清理」</span>
+          <p>
+            <code>on_reply</code> 在收到新的 <code>ReplyStartEvent</code> 时直接用新字典覆盖旧状态
+            <span class="src" data-src="src/agentscope/middleware/_budget.py:135">_budget.py:135</span>，
+            并不会在 <code>ReplyEndEvent</code> 清理。源码注释解释了原因：外层中间件可能吞掉结束事件，
+            同一 reply 还要继续花钱。HITL 恢复因此不会把预算清零。
+          </p>
+        </div>
+        <p>
+          预算是 per reply，不是 per session。用户连续发十轮，每轮都重新计数。
+          要做会话级总额，得自己在中间件里跨 reply 累计。
+        </p>
+
+        <h2 id="privacy">隐私与体积：span 里有什么</h2>
+        <p>
+          AgentScope 的追踪默认<strong>非常详细</strong>，它记录的是内容，不只是元数据：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>内容</th>
+                <th>是否进 span</th>
+                <th>风险</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>用户输入、系统提示、上下文消息</td>
+                <td>是，JSON 字符串</td>
+                <td>PII、内部提示词泄露</td>
+              </tr>
+              <tr>
+                <td>模型完整输出</td>
+                <td>是</td>
+                <td>可能含敏感业务数据</td>
+              </tr>
+              <tr>
+                <td>工具入参与结果</td>
+                <td>是</td>
+                <td>可能含密钥、数据库内容</td>
+              </tr>
+              <tr>
+                <td>图片 / 音频 base64</td>
+                <td>是，<code>DataBlock</code> 转成 blob part</td>
+                <td>体积巨大，且是原始内容</td>
+              </tr>
+              <tr>
+                <td>凭证 key</td>
+                <td>否</td>
+                <td>不在消息里，除非你的提示或工具参数自己带了</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          图片和音频的转换在
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_converter.py:30">_converter.py:30</span>，
+          <code>Base64Source</code> 会把 <code>data</code> 原样写进
+          <code>gen_ai.input.messages</code>
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_converter.py:55">_converter.py:55</span>。
+          一次带图的请求，span 可能比请求本身还大。
+        </p>
+        <p>
+          AgentScope <strong>没有</strong>内建的脱敏 / 截断开关。可选做法：
+        </p>
+        <ul>
+          <li>在 OTel Collector 或自定义 <code>SpanProcessor</code> 里删除敏感属性</li>
+          <li>给高敏租户不装 <code>TracingMiddleware</code>，只保留指标</li>
+          <li>用采样降低导出量（但采样不能替代脱敏，见下节）</li>
+          <li>把 span 存到符合数据合规要求的后端</li>
+        </ul>
+
+        <h2 id="overhead">开销与采样</h2>
+        <p>
+          开销分两段，别混为一谈：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>没注册 provider</th>
+                <th>注册了 provider</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>hook 调用</td>
+                <td>一次 <code>isinstance</code> 判断后短路</td>
+                <td>正常进入</td>
+              </tr>
+              <tr>
+                <td>属性序列化</td>
+                <td>不执行</td>
+                <td><strong>总是执行</strong>，在创建 span 之前</td>
+              </tr>
+              <tr>
+                <td>span 创建 / 导出</td>
+                <td>无</td>
+                <td>由 SDK 采样与批处理决定</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <code>on_reply</code> 先算 <code>request_attributes</code> 再
+          <code>start_span</code>
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_trace.py:152">_trace.py:152</span>；
+          <code>on_model_call</code> 同理
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_trace.py:281">_trace.py:281</span>。
+          所以采样只能减少「导出与存储」，省不掉消息 JSON 的序列化。
+        </p>
+        <p>
+          生产建议：
+        </p>
+        <ul>
+          <li>用 <code>BatchSpanProcessor</code>，别用同步导出</li>
+          <li>高 QPS 场景配 <code>ParentBased(TraceIdRatioBased(0.1))</code> 之类的采样器</li>
+          <li>长会话注意 span 属性里的完整上下文，必要时在 Collector 侧截断</li>
+          <li>把追踪初始化放在进程入口，避免每次创建 Agent 都重复设置 provider</li>
+        </ul>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>开启追踪</td><td>注册 <code>TracerProvider</code> + <code>TracingMiddleware()</code></td></tr>
+              <tr><td>Agent Service 接入</td><td><code>create_app(extra_agent_middlewares=factory)</code></td></tr>
+              <tr><td>本地看 span</td><td><code>SimpleSpanProcessor(ConsoleSpanExporter())</code></td></tr>
+              <tr><td>按会话查链路</td><td><code>gen_ai.conversation.id = session_id</code></td></tr>
+              <tr><td>按轮次分组</td><td><code>agentscope.agent.reply_id</code></td></tr>
+              <tr><td>取 token</td><td><code>ModelCallEndEvent.input_tokens / output_tokens</code></td></tr>
+              <tr><td>算钱</td><td>token × 单价，自己维护价目表</td></tr>
+              <tr><td>限预算</td><td><code>ReplyBudgetControlMiddleware(token_budget=...)</code></td></tr>
+              <tr><td>加自定义节点</td><td><code>trace.get_tracer("agentscope", __version__)</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">装了中间件却没注册 provider</span>
+          <p>
+            所有 hook 静默短路，不报错也不出 span。先确认
+            <code>trace.get_tracer_provider()</code> 是真正的 SDK provider。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">在 Agent Service 里找不到追踪</span>
+          <p>
+            <code>create_app</code> 不会自动装 <code>TracingMiddleware</code>。
+            要用 <code>extra_agent_middlewares</code> 工厂返回它。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">指望 reply span 直接给总 token</span>
+          <p>
+            <code>invoke_agent</code> 只记输入输出消息，不汇总 token。
+            总量要在 <code>chat</code> span 或 <code>ModelCallEndEvent</code> 上算。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">以为采样能省掉序列化</span>
+          <p>
+            请求属性在 span 创建前就已序列化。采样减少的是导出量与存储，不是 CPU。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">把 base64 图片塞进 span</span>
+          <p>
+            <code>DataBlock</code> 会原样进属性。多模态场景务必在 Collector 侧裁剪，
+            否则存储和带宽都会被拖垮。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">用估算 token 算钱</span>
+          <p>
+            <code>count_tokens</code> 是「字节 / 4」的近似值，只服务上下文压缩。
+            计费必须用 provider 返回的 usage。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">预算中间件无状态，可以共享</span>
+          <p>
+            运行时状态在 <code>agent.state.middle_context</code>，不在中间件实例上。
+            一个实例挂到多个 Agent 是安全的，但预算仍然是每 Agent、每 reply 独立。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li>一次 reply 的 span 树有哪几层？token 记在哪一层？</li>
+          <li>采样率调到 10%，请求消息的 JSON 序列化会减少 90% 吗？为什么？</li>
+          <li><code>ReplyBudgetControlMiddleware</code> 的预算作用域是什么？HITL 恢复后会不会清零？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>用 <code>ConsoleSpanExporter</code> 跑一轮带工具的 reply，数一数 span 树有几个节点。</li>
+          <li>写一个中间件，在 <code>ReplyEndEvent</code> 时打印本轮 input / output token 总和。</li>
+          <li>给 <code>CostMiddleware</code> 加上缓存 token 的单独单价，并换成 <code>Decimal</code>。</li>
+          <li>把 <code>ReplyBudgetControlMiddleware</code> 的预算调到很小，观察它如何阻止下一轮工具调用。</li>
+          <li>检查一个带图片的消息，看看 span 属性有多大，再决定要不要在 Collector 侧裁剪。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          能看见、能算钱之后，下一个问题是：改了提示词或换了模型，效果到底变好还是变差？
+          下一章 <strong>22 测试与评测：不烧钱的回归集</strong> 讲怎么把主观感受变成可重复的评测。
+          想先复习事件流，可以回 <a href="03-message-event.html">03 消息与事件</a>。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

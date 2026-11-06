@@ -2,6 +2,20 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.21.0 — 2026-11-07
+
+新增第 21 章「可观测性」，把追踪、token 与成本串成一条线。
+
+- **追踪**：`TracerProvider` 注册、`TracingMiddleware` 三个 hook、显式短路条件、tracer 名与版本。
+- **Span 树**：`invoke_agent` / `chat` / `execute_tool` 三层，conversation id 与 reply id 的分组作用。
+- **属性**：GenAI 语义约定、Agent / 模型 / 工具各自记录什么、缓存 token 扩展属性。
+- **流式**：`end_on_exit=False`、末 chunk 写响应、HITL 两次调用共享 reply id、外部执行补偿 span。
+- **Agent Service**：`extra_agent_middlewares` 工厂，与 ASGI `extra_middlewares` 区分。
+- **Token**：`ChatUsage`、`ModelCallEndEvent`、`Msg.usage`、`count_tokens` 只是估算。
+- **成本**：无内置价目表，自定义中间件按模型单价累计，缓存 token 单独定价，生产用 `Decimal`。
+- **预算**：`ReplyBudgetControlMiddleware` 的加权成本、`HintBlock` 与 `tool_choice=none`、per reply 作用域。
+- **隐私与开销**：完整消息与 base64 会进 span、无内建脱敏、采样不省序列化。
+
 ## v0.20.0 — 2026-11-07
 
 新增第 20 章「资源与多租户」，把「共享但不泄露」讲清楚。
