@@ -2,6 +2,18 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.10.0 — 2026-11-06
+
+新增第 10 章「计划模式与 SOP」，区分「模型自己管步骤」和「开发者固定步骤」。
+
+- **计划模式**：`TaskCreate` / `TaskGet` / `TaskList` / `TaskUpdate`，状态注入与默认放行。
+- **任务模型**：`Task` 字段、`pending → in_progress → completed`、`blocks` / `blocked_by` 双向依赖。
+- **删除语义**：`deleted` 是 `TaskUpdate` 的操作，不是存储状态；硬删除会修正依赖边。
+- **计划注入**：`task_tool_names` 如何抑制重复注入，压缩后为什么还能记得任务。
+- **SOP**：`SOP` / `SOPStep` / `SOPStepBase`，执行者 + 可选验证者，`max_attempts`。
+- **SOP 运行**：执行 → 验收 → 交接，`handover` 只传交付不传过程；三种情况都消耗 `max_attempts`。
+- **持久化**：`SOPRunState` 可存 JSON，但 Agent 上下文要另存；步骤数变化会抛 `ValueError`。
+
 ## v0.9.0 — 2026-11-06
 
 新增第 09 章「流水线」，进入多智能体编排。

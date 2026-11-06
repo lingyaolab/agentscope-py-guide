@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 计划模式与 SOP：TaskCreate/Get/List/Update 四个任务工具、任务状态与依赖、SOP/SOPStep/SOPEngine、验收循环与运行状态持久化。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="10 计划模式与 SOP：把多步任务变成可验收的里程碑 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="TaskCreate/Get/List/Update 四个任务工具、任务状态与依赖、SOP/SOPStep/SOPEngine、验收循环与运行状态持久化。" />
+    <title>10 计划模式与 SOP：把多步任务变成可验收的里程碑 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="10-plan-sop" data-root="..">
+    <main>
+      <article class="article">
+        <h1>10 · 计划模式与 SOP</h1>
+        <p class="lede">
+          09 章的流水线由开发者固定「谁先谁后」。这一章是另一种思路：
+          <strong>计划模式</strong>让模型自己维护任务清单，<strong>SOP</strong>让开发者把流程定义成
+          一串必须逐个验收的里程碑。两者都解决「多步任务」，但控制权在谁手里完全不同。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>用四个任务工具让模型自己拆解、认领、完成工作</li>
+          <li>说清 <code>blocks</code> / <code>blocked_by</code> 的双向关系，以及为什么 <code>deleted</code> 不是状态</li>
+          <li>用 <code>SOP</code> + <code>SOPEngine</code> 定义一个带验收的固定流程</li>
+          <li>把运行状态落盘，隔一个进程再接着跑</li>
+        </ul>
+
+        <h2 id="why">先说为什么：任务清单不是给用户看的</h2>
+        <p>
+          多步任务最容易出的问题不是「不会做」，而是「做着做着忘了」。上下文一压缩，前面定的步骤就没了；
+          模型开始即兴发挥，最后交付的东西和最初要求对不上。
+        </p>
+        <p>两种机制分别从两个方向解决它：</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>机制</th>
+                <th>谁决定步骤</th>
+                <th>适合</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>计划模式</td>
+                <td>模型通过工具调用自己维护</td>
+                <td>步骤无法预先确定，需要边做边调整</td>
+              </tr>
+              <tr>
+                <td>SOP</td>
+                <td>开发者在构造时写死</td>
+                <td>步骤固定、每步都有明确验收标准</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          两者都不是「多 Agent 通信协议」，而是<strong>让多步工作有外部记忆和外部约束</strong>。
+        </p>
+
+        <h2 id="plan">计划模式：四个任务工具</h2>
+        <p>
+          AgentScope 内置四个任务工具，它们都继承同一个基类
+          <span class="src" data-src="src/agentscope/tool/_task/_task_tool_base.py:14">_task_tool_base.py:14</span>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>工具</th>
+                <th>操作</th>
+                <th>只读</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>TaskCreate</code><span class="src" data-src="src/agentscope/tool/_task/_create_task.py:25">_create_task.py:25</span></td>
+                <td>向清单末尾追加任务</td>
+                <td>否</td>
+              </tr>
+              <tr>
+                <td><code>TaskGet</code><span class="src" data-src="src/agentscope/tool/_task/_get_task.py:18">_get_task.py:18</span></td>
+                <td>按 ID 读取完整任务</td>
+                <td>是</td>
+              </tr>
+              <tr>
+                <td><code>TaskList</code><span class="src" data-src="src/agentscope/tool/_task/_list_task.py:16">_list_task.py:16</span></td>
+                <td>列出所有任务与状态</td>
+                <td>是</td>
+              </tr>
+              <tr>
+                <td><code>TaskUpdate</code><span class="src" data-src="src/agentscope/tool/_task/_update_task.py:54">_update_task.py:54</span></td>
+                <td>改状态、字段、依赖，或删除</td>
+                <td>否</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          四个工具都是<strong>状态注入式</strong>：<code>is_state_injected=True</code>
+          <span class="src" data-src="src/agentscope/tool/_task/_task_tool_base.py:25">_task_tool_base.py:25</span>，
+          运行时会把 <code>AgentState</code> 注入，工具直接读写
+          <code>agent.state.tasks_context</code>。
+        </p>
+        <p>
+          权限也全部硬编码为 <code>ALLOW</code>
+          <span class="src" data-src="src/agentscope/tool/_task/_task_tool_base.py:40">_task_tool_base.py:40</span>：
+          它们只改内存状态，不会触发用户确认。
+        </p>
+        <p>装配方式和普通工具一样：</p>
+        <pre><code>from agentscope.tool import TaskCreate, TaskGet, TaskList, TaskUpdate, Toolkit
+
+toolkit = Toolkit(
+    tools=[
+        TaskCreate(),
+        TaskGet(),
+        TaskList(),
+        TaskUpdate(),
+    ],
+)</code></pre>
+
+        <h2 id="task">任务模型：状态、依赖与 owner</h2>
+        <p>
+          任务定义在 <code>Task</code>
+          <span class="src" data-src="src/agentscope/state/_task.py:10">_task.py:10</span>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>id</code><span class="src" data-src="src/agentscope/state/_task.py:28">_task.py:28</span></td><td>单调递增的数字串，由 <code>TaskCreate</code> 分配</td></tr>
+              <tr><td><code>subject</code><span class="src" data-src="src/agentscope/state/_task.py:13">_task.py:13</span></td><td>一句话命令式描述</td></tr>
+              <tr><td><code>description</code><span class="src" data-src="src/agentscope/state/_task.py:16">_task.py:16</span></td><td>详细需求与上下文</td></tr>
+              <tr><td><code>state</code><span class="src" data-src="src/agentscope/state/_task.py:25">_task.py:25</span></td><td><code>pending</code> / <code>in_progress</code> / <code>completed</code></td></tr>
+              <tr><td><code>owner</code><span class="src" data-src="src/agentscope/state/_task.py:31">_task.py:31</span></td><td>多智能体场景下的认领者</td></tr>
+              <tr><td><code>blocks</code><span class="src" data-src="src/agentscope/state/_task.py:34">_task.py:34</span></td><td>被本任务阻塞的任务 ID</td></tr>
+              <tr><td><code>blocked_by</code><span class="src" data-src="src/agentscope/state/_task.py:37">_task.py:37</span></td><td>必须先完成的任务 ID</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct"><code>deleted</code> 不是状态，是操作</span>
+          <p>
+            <code>Task.state</code> 只接受三个值。把 <code>status</code> 设为 <code>deleted</code>
+            会<strong>硬删除</strong>任务，并修正所有引用它的依赖边
+            <span class="src" data-src="src/agentscope/tool/_task/_update_task.py:142">_update_task.py:142</span>。
+            删除后任务不会以「已删除」状态留在列表里。
+          </p>
+        </div>
+        <h3>依赖是双向的</h3>
+        <p>
+          <code>TaskUpdate</code> 的 <code>add_blocked_by</code> 会同时改两端
+          <span class="src" data-src="src/agentscope/tool/_task/_update_task.py:199">_update_task.py:199</span>：
+          让任务 2 依赖任务 1 时，<code>2.blocked_by</code> 加 <code>"1"</code>，
+          <code>1.blocks</code> 自动加 <code>"2"</code>。手动改 <code>tasks_context</code> 时，
+          这两端要自己保持同步。
+        </p>
+        <p>
+          阻塞只是<strong>建议性</strong>的：<code>TaskList</code> 会标注未解依赖，
+          但运行时不会阻止模型去做一个被阻塞的任务。它是给模型看的优先级信号，不是硬锁。
+        </p>
+        <p>
+          所有任务存在 <code>agent.state.tasks_context</code>
+          <span class="src" data-src="src/agentscope/state/_state.py:175">_state.py:175</span>
+          里，跟着 <code>AgentState</code> 一起序列化。两个 Agent 默认不共享任务清单。
+        </p>
+
+        <h2 id="plan-flow">计划怎么推进：创建 → 认领 → 完成</h2>
+        <p>典型的计划循环：</p>
+        <ol>
+          <li>收到新指令，对每个离散步骤调用一次 <code>TaskCreate</code>，给一句 <code>subject</code> 和更详细的 <code>description</code></li>
+          <li><code>TaskList</code> 看队列，挑 ID 最小、没有未解 <code>blocked_by</code> 的 <code>pending</code> 任务</li>
+          <li>开工前 <code>TaskUpdate(status="in_progress", owner=...)</code></li>
+          <li>描述很长时先 <code>TaskGet</code> 拿完整上下文</li>
+          <li>完成后 <code>TaskUpdate(status="completed")</code>；发现新工作就回到 <code>TaskCreate</code>；不做了就 <code>deleted</code></li>
+        </ol>
+        <pre><code>async def add_dependency(agent) -&gt; None:
+    # 让任务 2 依赖任务 1
+    await TaskUpdate()(
+        task_id="2",
+        add_blocked_by=["1"],
+        _agent_state=agent.state,
+    )
+    # 结果：task "2".blocked_by == ["1"]，task "1".blocks == ["2"]</code></pre>
+        <h3>预置任务</h3>
+        <p>
+          任务就是普通 Pydantic 模型，可以在第一次 reply 之前直接写进去：
+        </p>
+        <pre><code>from agentscope.state import Task
+
+agent.state.tasks_context.tasks.extend(
+    [
+        Task(
+            id="1",
+            subject="读需求",
+            description="阅读 README.md 与 CONTRIBUTING.md。",
+            metadata={"source": "seed"},
+        ),
+        Task(
+            id="2",
+            subject="写实现计划",
+            description="基于需求产出分步计划。",
+            blocked_by=["1"],
+            metadata={"source": "seed"},
+        ),
+    ],
+)
+# 手动维护反向边
+agent.state.tasks_context.tasks[0].blocks.append("2")</code></pre>
+        <p>
+          手动修改时有三条硬要求：ID 用数字串（<code>TaskCreate</code> 取
+          <code>max(int(id)) + 1</code>
+          <span class="src" data-src="src/agentscope/tool/_task/_create_task.py:105">_create_task.py:105</span>）、
+          依赖边双向一致、状态值合法。
+        </p>
+
+        <h2 id="injection">任务注入：让模型记得还有活</h2>
+        <p>
+          计划模式真正起作用，靠的是 06 章的运行时状态注入。当存在 <code>pending</code> 或
+          <code>in_progress</code> 任务，且上下文中既没有任务相关工具调用、也没有旧的任务注入时，
+          框架会插一条提示，告诉模型还有多少活没干
+          <span class="src" data-src="src/agentscope/agent/_agent.py:1393">_agent.py:1393</span>。
+        </p>
+        <p>
+          这条注入在上下文压缩后尤其重要：任务工具调用可能已经被摘要掉，但任务本身还在
+          <code>agent.state.tasks_context</code> 里。注入让模型重新「看见」它。
+        </p>
+        <p>
+          框架靠 <code>InjectionConfig.task_tool_names</code> 识别「模型已经知道任务了」
+          <span class="src" data-src="src/agentscope/agent/_config.py:326">_config.py:326</span>，
+          默认是四个任务工具。如果你自定义了任务工具名，要同步改这个列表，否则会重复注入。
+        </p>
+
+        <h2 id="sop">SOP：把流程定义成可验收步骤</h2>
+        <p>
+          SOP（标准作业流程）把「有哪些步骤、每步要证明什么」写死在代码里。
+          <code>SOP</code>
+          <span class="src" data-src="src/agentscope/sop/_schema.py:415">_schema.py:415</span>
+          只有三个字段：
+        </p>
+        <pre><code>SOP(
+    name="write-article",
+    description="先大纲，后正文",
+    steps=[...],
+)</code></pre>
+        <p>
+          最常用的步骤是 <code>SOPStep</code>
+          <span class="src" data-src="src/agentscope/sop/_schema.py:193">_schema.py:193</span>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>参数</th>
+                <th>默认</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>subject</code><span class="src" data-src="src/agentscope/sop/_schema.py:203">_schema.py:203</span></td><td>必填</td><td>步骤短名</td></tr>
+              <tr><td><code>description</code><span class="src" data-src="src/agentscope/sop/_schema.py:204">_schema.py:204</span></td><td>必填</td><td>这一步必须达成的结果，只写终点不写路线</td></tr>
+              <tr><td><code>executor</code><span class="src" data-src="src/agentscope/sop/_schema.py:205">_schema.py:205</span></td><td>必填</td><td>执行者，满足 <code>AgentLike</code></td></tr>
+              <tr><td><code>verifier</code><span class="src" data-src="src/agentscope/sop/_schema.py:206">_schema.py:206</span></td><td><code>None</code></td><td>验证者；为 <code>None</code> 时交付即通过</td></tr>
+              <tr><td><code>max_attempts</code><span class="src" data-src="src/agentscope/sop/_schema.py:207">_schema.py:207</span></td><td><code>3</code></td><td>最多被驳回几次，超出后整个运行失败</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <pre><code>from agentscope.sop import SOP, SOPStep
+
+sop = SOP(
+    name="write-article",
+    description="先大纲，后正文",
+    steps=[
+        SOPStep(
+            subject="列出大纲",
+            description="给出一份至少包含三个章节的文章大纲。",
+            executor=writer,
+            verifier=reviewer,
+            max_attempts=3,
+        ),
+        SOPStep(
+            subject="撰写正文",
+            description="严格按照上一步的大纲写出完整正文。",
+            executor=writer,
+        ),
+    ],
+)</code></pre>
+        <p>
+          同一个 Agent 用在多个步骤里，它的上下文在这些步骤间是连续的；每步换不同的 Agent，
+          上下文就互相独立。
+        </p>
+        <div class="callout warn">
+          <span class="ct">验收不要单独写成一步</span>
+          <p>
+            如果「检查大纲」是一个独立步骤，被驳回后重跑的是检查本身，结论不会变，直到次数用尽。
+            验收是 <code>verifier</code> 的职责，不是流程里的一个里程碑。
+          </p>
+        </div>
+
+        <h2 id="sop-flow">SOP 怎么跑：执行 → 验收 → 交接</h2>
+        <p>
+          <code>SOPEngine</code>
+          <span class="src" data-src="src/agentscope/sop/_engine.py:24">_engine.py:24</span>
+          按顺序推进，已完成的步骤跳过。每一步的一次尝试分两半：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>发生什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>执行</td>
+                <td>执行者收到步骤说明与上一步交接，完成后以结构化输出交出 <code>handover</code></td>
+              </tr>
+              <tr>
+                <td>验收</td>
+                <td>验证者看到步骤说明、输入与交付，以结构化输出给出 <code>passed</code> 与 <code>message</code></td>
+              </tr>
+              <tr>
+                <td>通过</td>
+                <td>步骤完成，交付成为下一步的输入</td>
+              </tr>
+              <tr>
+                <td>驳回</td>
+                <td>清空交付，把 <code>message</code> 与「第几次尝试」交给执行者重做</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          步骤之间<strong>只传交付内容</strong>，不传文件或对话。第一步收到运行的输入，之后每一步收到的是
+          上一步的 <code>handover</code>，包在 <code>&lt;handover from="上一步名称"&gt;</code> 标签里。
+          所以执行者写交接时，要假设后续步骤没看过它的工作过程。
+        </p>
+        <h3>两种「重来」都消耗 max_attempts</h3>
+        <p>和 <code>GoalPipeline</code> 不同，SOP 里下面三种情况都算一次驳回：</p>
+        <ul>
+          <li>验证者判 <code>passed=False</code></li>
+          <li>执行者结束了，但没给出结构化交付</li>
+          <li>验证者结束了，但没给出结论</li>
+        </ul>
+        <p>
+          没有单独的 <code>max_retries</code>。这也是为什么 <code>max_attempts</code> 要留够余量。
+        </p>
+        <h3>进度事件</h3>
+        <p>每次尝试前后各产出一个 <code>CustomEvent</code>：</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>事件名</th>
+                <th><code>value</code></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>SOP_STEP_STARTED</code></td><td><code>step</code>、<code>attempt</code></td></tr>
+              <tr><td><code>SOP_STEP_ENDED</code></td><td><code>step</code>、<code>phase</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          运行阶段由各步骤推算
+          <span class="src" data-src="src/agentscope/sop/_state.py:132">_state.py:132</span>：
+          全部未开始 <code>PENDING</code>、任一步失败 <code>FAILED</code>、全部完成 <code>COMPLETED</code>、
+          任一步挂起 <code>AWAITING</code>、其余 <code>RUNNING</code>。
+        </p>
+
+        <h2 id="sop-state">运行状态与挂起恢复</h2>
+        <p>
+          <code>SOPRunState</code>
+          <span class="src" data-src="src/agentscope/sop/_state.py:104">_state.py:104</span>
+          是纯数据：运行的输入、每一步的阶段、交付与历次结论。它可以直接存 JSON：
+        </p>
+        <pre><code>from agentscope.sop import SOPEngine, SOPRunState
+
+# 挂起后保存
+saved = engine.state.model_dump_json()
+
+# 之后用同一份定义 + 保存的状态重建
+engine = SOPEngine(
+    sop,
+    SOPRunState.model_validate_json(saved),
+)</code></pre>
+        <div class="callout warn">
+          <span class="ct">SOPRunState 不包含 Agent 的上下文</span>
+          <p>
+            执行者和验证者各自是 <code>Agent</code>，它们的对话与摘要要按 Agent 自己的方式另存，
+            再用它们重新构造 <code>SOP</code>。只恢复 <code>SOPRunState</code> 是不够的。
+          </p>
+        </div>
+        <p>
+          如果保存之后改了 <code>sop.steps</code> 的数量，重建时 <code>SOPEngine</code> 会抛
+          <code>ValueError</code>
+          <span class="src" data-src="src/agentscope/sop/_engine.py:51">_engine.py:51</span>。
+        </p>
+        <h3>挂起与恢复</h3>
+        <p>
+          执行者或验证者停在工具授权 / 外部执行上时，这一步进入 <code>AWAITING</code>，
+          <code>reply_stream</code> 直接结束，不挂起协程。恢复时把结果事件喂回去，
+          引擎按 <code>reply_id</code> 找到挂起的那一步。
+        </p>
+        <pre><code>async def resume(engine, confirm_event) -&gt; None:
+    async for event in engine.reply_stream(confirm_event):
+        ...</code></pre>
+        <p>
+          <code>UserInterruptEvent</code> 是放弃：本次尝试作废，但<strong>不计入驳回次数</strong>，
+          这一步回到 <code>PENDING</code>。
+        </p>
+        <h3>自定义步骤</h3>
+        <p>
+          不是「一人执行、一人验收」的步骤，可以继承 <code>SOPStepBase</code>。
+          引擎只要求「一次调用就是一次尝试」，并在传入的 state 上记下结论：
+        </p>
+        <pre><code>from agentscope.sop import SOPPhase, SOPStepBase, SOPStepRunState
+
+
+class RunTests(SOPStepBase):
+    async def reply_stream(self, inputs, state: SOPStepRunState):
+        state.phase = SOPPhase.RUNNING
+        passed, report = await run_test_suite()
+        self.record(state, passed, message=report, verifier="pytest")
+        return
+        yield</code></pre>
+        <p>
+          <code>record()</code> 负责写结论；驳回时会清空交付并回到 <code>PENDING</code>。
+        </p>
+
+        <h2 id="compare">Plan vs SOP vs Pipeline</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>场景</th>
+                <th>用什么</th>
+                <th>原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>步骤要边做边定</td>
+                <td>计划模式</td>
+                <td>模型自己拆解、调整，工具只是外部记忆</td>
+              </tr>
+              <tr>
+                <td>步骤固定，每步有验收</td>
+                <td>SOP</td>
+                <td>顺序与验收标准由开发者固定，可持久化</td>
+              </tr>
+              <tr>
+                <td>只有一个目标，反复逼近</td>
+                <td><code>GoalPipeline</code></td>
+                <td>执行者 + 验证者循环，只有一个验收闸门</td>
+              </tr>
+              <tr>
+                <td>多人分工，分派由模型决定</td>
+                <td><code>TeamPipeline</code></td>
+                <td>队长按成员描述分派，成员各用各的工具</td>
+              </tr>
+              <tr>
+                <td>固定流程图式的多 Agent</td>
+                <td>自己写代码编排</td>
+                <td>现有 Pipeline 只覆盖两种模式，复杂图用代码更清楚</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>开启计划模式</td><td><code>Toolkit(tools=[TaskCreate(), TaskGet(), TaskList(), TaskUpdate()])</code></td></tr>
+              <tr><td>预置任务</td><td><code>agent.state.tasks_context.tasks.extend([...])</code></td></tr>
+              <tr><td>加依赖</td><td><code>TaskUpdate(task_id="2", add_blocked_by=["1"])</code></td></tr>
+              <tr><td>删除任务</td><td><code>TaskUpdate(task_id="1", status="deleted")</code></td></tr>
+              <tr><td>清空计划</td><td><code>agent.state.tasks_context.tasks.clear()</code></td></tr>
+              <tr><td>定义 SOP</td><td><code>SOP(name=..., steps=[SOPStep(...)])</code></td></tr>
+              <tr><td>运行 SOP</td><td><code>SOPEngine(sop)</code> + <code>reply_stream(msg)</code></td></tr>
+              <tr><td>保存运行</td><td><code>engine.state.model_dump_json()</code></td></tr>
+              <tr><td>终端调试 SOP</td><td><code>launch_console(agent=SOPEngine(sop))</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">手动改任务时依赖只改一边</span>
+          <p>
+            <code>TaskUpdate</code> 会自动维护 <code>blocks</code> 与 <code>blocked_by</code> 两端；
+            直接改 <code>tasks_context</code> 不会。只写 <code>blocked_by</code> 会让
+            <code>TaskList</code> 的阻塞提示和实际依赖对不上。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">用非数字 ID</span>
+          <p>
+            <code>TaskCreate</code> 用 <code>max(int(id)) + 1</code> 分配下一个 ID
+            <span class="src" data-src="src/agentscope/tool/_task/_create_task.py:105">_create_task.py:105</span>。
+            非数字 ID 会被忽略，之后自动分配的 ID 可能和它冲突。统一用 <code>"1"</code>、<code>"2"</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">以为阻塞会阻止执行</span>
+          <p>
+            <code>blocked_by</code> 只是给模型的建议。运行时不会拦截一个被阻塞的任务，
+            真正要强制顺序，用 SOP 或流水线。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">SOP 的失败次数比想象中少</span>
+          <p>
+            执行者没交出结构化结果、验证者没给出结论，都会消耗 <code>max_attempts</code>。
+            如果你按 <code>GoalPipeline</code> 的「只有判 fail 才算」来设，很容易提前用尽。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">SOP 的 description 只写终点</span>
+          <p>
+            <code>SOPStep.description</code> 应该写「这一步交付什么、什么算完成」，
+            不要写具体操作步骤。执行者自己决定怎么做，验证者按同一段描述验收。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">任务清单是 Agent 级的</span>
+          <p>
+            两个 Agent 默认不共享 <code>tasks_context</code>。多智能体要共用计划，
+            需要显式把同一个 <code>TaskContext</code> 传进去，或由外层统一分发任务。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li><code>Task.state</code> 有几个合法值？把 <code>status</code> 设为 <code>deleted</code> 后任务还在列表里吗？</li>
+          <li>计划模式靠什么让模型在上下文压缩后还记得任务？</li>
+          <li>SOP 里验证者判 fail 和「执行者没给结构化交付」，对 <code>max_attempts</code> 的影响一样吗？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>用四个任务工具让 Agent 做一个三步任务，观察 <code>TaskList</code> 的输出与任务注入提示。</li>
+          <li>把两个任务设成依赖关系，再让模型故意先做被阻塞的那个，确认运行时不阻止。</li>
+          <li>定义一个两步 SOP，第一步带验证者、第二步不带，观察 <code>SOP_STEP_STARTED</code> / <code>SOP_STEP_ENDED</code> 事件。</li>
+          <li>把 <code>engine.state</code> 存成 JSON，重建引擎后继续跑。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          计划与 SOP 管的是「流程」。下一章 <strong>11 RAG 与长期记忆</strong> 管的是「知识」：
+          文档怎么进来、检索怎么做、跨会话记忆怎么存。
+          11 章尚未发布前，可以先回 <a href="06-context.html">06 上下文管理</a> 复习
+          <code>tool_result_limit</code> 与卸载。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
