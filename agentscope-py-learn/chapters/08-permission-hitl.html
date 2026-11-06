@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 权限与 HITL：五种权限模式、决策顺序、PermissionRule 写法、bypass_immune、RequireUserConfirmEvent 与恢复、AskUser 外部执行。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="08 权限与 HITL：让危险工具停下来问人 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="五种权限模式、决策顺序、PermissionRule、bypass_immune、用户确认与外部执行的暂停/恢复。" />
+    <title>08 权限与 HITL：让危险工具停下来问人 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="08-permission-hitl" data-root="..">
+    <main>
+      <article class="article">
+        <h1>08 · 权限与 HITL</h1>
+        <p class="lede">
+          05 章你给 <code>FunctionTool</code> 加了 <code>is_read_only=True</code> 绕开确认，但那只是最简单的场景。
+          真实系统里，工具会删文件、发消息、动生产库。这一章讲清权限的四种决策、五种模式、规则写法，
+          以及「停下来问人」之后怎么把结果带回去。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>说出 <code>DEFAULT</code> 模式下一次工具调用的六步判定顺序</li>
+          <li>写 allow / deny / ask 规则，并知道 <code>rule_content</code> 在不同工具上的语义</li>
+          <li>解释 <code>bypass_immune</code> 为什么能挡住 allow 规则，以及 BYPASS 模式为什么挡不住</li>
+          <li>完整走一遍 <code>RequireUserConfirmEvent</code> → <code>UserConfirmResultEvent</code> 的暂停与恢复</li>
+        </ul>
+
+        <h2 id="why">先说为什么：权限不是「加个 if」</h2>
+        <p>
+          一个布尔值 <code>allowed</code> 无法表达真实需求。你需要的是四种结果：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>行为</th>
+                <th>含义</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>ALLOW</code></td>
+                <td>直接执行</td>
+              </tr>
+              <tr>
+                <td><code>DENY</code></td>
+                <td>拒绝，把「被拒绝」作为工具结果回给模型</td>
+              </tr>
+              <tr>
+                <td><code>ASK</code></td>
+                <td>停下来问用户，回复进入暂停状态</td>
+              </tr>
+              <tr>
+                <td><code>PASSTHROUGH</code></td>
+                <td>工具不表态，交给权限引擎继续匹配规则</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          而且判定不是一层：<strong>全局模式</strong>决定大方向，<strong>规则</strong>处理具体调用，
+          <strong>工具自己</strong>还能做安全检查，最后<strong>用户</strong>可以逐次确认。
+          这四层合起来才是权限系统。
+        </p>
+
+        <h2 id="modes">五种模式：从 DEFAULT 到 DONT_ASK</h2>
+        <p>
+          模式定义在 <code>PermissionMode</code>
+          <span class="src" data-src="src/agentscope/permission/_types.py:18">_types.py:18</span>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>模式</th>
+                <th>行为</th>
+                <th>适用场景</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>DEFAULT</code><span class="src" data-src="src/agentscope/permission/_types.py:81">_types.py:81</span></td>
+                <td>只读自动放行，其余没有 allow 规则就问用户</td>
+                <td>默认，最安全</td>
+              </tr>
+              <tr>
+                <td><code>ACCEPT_EDITS</code><span class="src" data-src="src/agentscope/permission/_types.py:82">_types.py:82</span></td>
+                <td>DEFAULT + 工作目录内的写入/编辑自动放行</td>
+                <td>用户在场、快速迭代</td>
+              </tr>
+              <tr>
+                <td><code>EXPLORE</code><span class="src" data-src="src/agentscope/permission/_types.py:83">_types.py:83</span></td>
+                <td>只读放行，任何修改都拒绝</td>
+                <td>代码探索、做方案</td>
+              </tr>
+              <tr>
+                <td><code>BYPASS</code><span class="src" data-src="src/agentscope/permission/_types.py:84">_types.py:84</span></td>
+                <td>跳过安全检查，只剩 deny / ask 规则</td>
+                <td>沙箱、完全可信环境</td>
+              </tr>
+              <tr>
+                <td><code>DONT_ASK</code><span class="src" data-src="src/agentscope/permission/_types.py:85">_types.py:85</span></td>
+                <td>所有 ASK 转成 DENY</td>
+                <td>无人值守、定时任务</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct"><code>BYPASS</code> 不是「更宽松的默认」</span>
+          <p>
+            它会跳过工具发出的<strong>安全 ASK</strong>，包括 <code>rm -rf /</code>、写 <code>~/.bashrc</code>、
+            命令注入模式。无人值守又想要安全，用 <code>DONT_ASK</code>，不是 BYPASS。
+          </p>
+        </div>
+
+        <h2 id="decision">决策顺序：一次工具调用怎么被判定</h2>
+        <p>
+          引擎入口是 <code>PermissionEngine.check_permission()</code>
+          <span class="src" data-src="src/agentscope/permission/_engine.py:77">_engine.py:77</span>，
+          按模式分发。以最常用的 <code>DEFAULT</code> 为例
+          <span class="src" data-src="src/agentscope/permission/_engine.py:117">_engine.py:117</span>：
+        </p>
+        <pre><code>1. deny 规则命中        → DENY
+2. ask 规则命中         → ASK（附带建议规则）
+3. 只读快速通道         → ALLOW
+4. 工具自己的 check_permissions：
+     ALLOW / DENY       → 原样返回
+     安全 ASK           → 原样返回，allow 规则不能覆盖
+     普通 ASK / PASSTHROUGH → 继续
+5. allow 规则命中       → ALLOW
+6. 默认                 → ASK（附带建议规则）</code></pre>
+        <p>
+          顺序本身就是优先级：<strong>deny 最高，ask 次之，allow 只排在工具检查之后</strong>。
+          这解释了为什么「加了一条 allow 规则，危险操作仍然会问」——它压根走不到 allow 那一步。
+        </p>
+        <p>
+          判定结果是一个 <code>PermissionDecision</code>
+          <span class="src" data-src="src/agentscope/permission/_decision.py:11">_decision.py:11</span>，
+          除了 <code>behavior</code> 和 <code>message</code>，还有三个字段值得知道：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>suggested_rules</code><span class="src" data-src="src/agentscope/permission/_decision.py:30">_decision.py:30</span></td>
+                <td>给用户「以后都允许」的候选规则</td>
+              </tr>
+              <tr>
+                <td><code>bypass_immune</code><span class="src" data-src="src/agentscope/permission/_decision.py:33">_decision.py:33</span></td>
+                <td>安全 ASK：allow 规则不能把它静默成 ALLOW</td>
+              </tr>
+              <tr>
+                <td><code>updated_input</code></td>
+                <td>允许引擎修正输入（比如清洗路径）</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="rules">规则：allow / deny / ask 的写法</h2>
+        <p>
+          一条 <code>PermissionRule</code>
+          <span class="src" data-src="src/agentscope/permission/_rule.py:8">_rule.py:8</span>
+          有四个字段：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>tool_name</code><span class="src" data-src="src/agentscope/permission/_rule.py:24">_rule.py:24</span></td>
+                <td>工具名，如 <code>Bash</code>、<code>Write</code></td>
+              </tr>
+              <tr>
+                <td><code>rule_content</code><span class="src" data-src="src/agentscope/permission/_rule.py:28">_rule.py:28</span></td>
+                <td>匹配模式，语义随工具变化</td>
+              </tr>
+              <tr>
+                <td><code>behavior</code><span class="src" data-src="src/agentscope/permission/_rule.py:31">_rule.py:31</span></td>
+                <td><code>ALLOW</code> / <code>DENY</code> / <code>ASK</code></td>
+              </tr>
+              <tr>
+                <td><code>source</code><span class="src" data-src="src/agentscope/permission/_rule.py:34">_rule.py:34</span></td>
+                <td>来源，如 <code>userSettings</code>、<code>projectSettings</code>、<code>session</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3><code>rule_content</code> 在不同工具上的语义</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>工具</th>
+                <th>匹配对象</th>
+                <th>示例</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>Bash</code></td>
+                <td>命令字符串，前缀通配</td>
+                <td><code>npm run:*</code>、<code>git commit:*</code></td>
+              </tr>
+              <tr>
+                <td><code>Read</code> / <code>Write</code> / <code>Edit</code></td>
+                <td><code>file_path</code>，glob</td>
+                <td><code>src/**</code>、<code>config.json</code></td>
+              </tr>
+              <tr>
+                <td>其他工具</td>
+                <td>JSON 序列化后的参数</td>
+                <td>工具自定义</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          规则按行为分三个字典存：<code>allow_rules</code>、<code>deny_rules</code>、<code>ask_rules</code>，
+          都以工具名为 key
+          <span class="src" data-src="src/agentscope/permission/_context.py:39">_context.py:39</span>。
+          运行时接受建议规则，会走 <code>add_rule()</code> 追加到对应列表
+          <span class="src" data-src="src/agentscope/permission/_engine.py:49">_engine.py:49</span>。
+        </p>
+        <pre><code>from agentscope.permission import (
+    PermissionBehavior,
+    PermissionContext,
+    PermissionMode,
+    PermissionRule,
+)
+
+permission_context = PermissionContext(
+    mode=PermissionMode.DEFAULT,
+    allow_rules={
+        "Bash": [
+            PermissionRule(
+                tool_name="Bash",
+                rule_content="npm run:*",
+                behavior=PermissionBehavior.ALLOW,
+                source="projectSettings",
+            ),
+        ],
+    },
+    deny_rules={
+        "Bash": [
+            PermissionRule(
+                tool_name="Bash",
+                rule_content="rm:*",
+                behavior=PermissionBehavior.DENY,
+                source="projectSettings",
+            ),
+        ],
+    },
+)</code></pre>
+        <p>
+          把它挂到 Agent 上，是通过 <code>AgentState.permission_context</code>
+          <span class="src" data-src="src/agentscope/permission/_context.py:31">_context.py:31</span>：
+        </p>
+        <pre><code>from agentscope.agent import Agent
+from agentscope.state import AgentState
+
+agent = Agent(
+    name="Friday",
+    system_prompt="...",
+    model=model,
+    toolkit=toolkit,
+    state=AgentState(permission_context=permission_context),
+)</code></pre>
+        <p>
+          运行时切换模式也很简单：
+        </p>
+        <pre><code>from agentscope.permission import PermissionMode
+
+agent.state.permission_context.mode = PermissionMode.EXPLORE</code></pre>
+
+        <h2 id="check">工具内置检查：bypass_immune 与危险路径</h2>
+        <p>
+          规则是「用户配置的策略」，工具检查是「工具自己的安全判断」。工具在
+          <code>check_permissions()</code> 里可以返回 <code>ALLOW</code>、<code>DENY</code> 或 <code>ASK</code>。
+        </p>
+        <p>
+          最值得注意的是带 <code>bypass_immune=True</code> 的 ASK
+          <span class="src" data-src="src/agentscope/permission/_engine.py:186">_engine.py:186</span>。
+          它表示「这次调用危险到不能用规则静默放行」：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>模式</th>
+                <th>安全 ASK 的处理</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>DEFAULT</code> / <code>ACCEPT_EDITS</code></td><td>尊重；allow 规则不能覆盖</td></tr>
+              <tr><td><code>EXPLORE</code></td><td>不适用（只读路径不调用工具检查）</td></tr>
+              <tr><td><code>BYPASS</code></td><td><strong>故意忽略</strong>；只剩 deny / ask 规则</td></tr>
+              <tr><td><code>DONT_ASK</code></td><td>转成 DENY</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          内置 <code>Bash</code> 会做静态分析：命令注入、危险命令、危险路径、危险删除。
+          文件工具会保护 <code>.env</code>、<code>.ssh/</code>、<code>.bashrc</code> 这类路径。
+          这些判断都在工具自己的 <code>check_permissions()</code> 里，不是引擎硬编码的。
+        </p>
+        <p>
+          还有一条和模式无关的快捷通道：<code>check_read_only()</code> 返回 True 时，
+          所有模式都直接放行
+          <span class="src" data-src="src/agentscope/permission/_engine.py:659">_engine.py:659</span>。
+          <code>Bash</code> 的 <code>ls</code> 算只读、<code>rm</code> 不算，就是靠这个方法动态判断的。
+        </p>
+
+        <h2 id="hitl">HITL：停下来，等一个结果事件</h2>
+        <p>
+          当判定是 <code>ASK</code>（或 <code>PASSTHROUGH</code>）时，Agent 不会执行工具，而是：
+        </p>
+        <ol>
+          <li>把工具调用状态改成 <code>ASKING</code><span class="src" data-src="src/agentscope/agent/_agent.py:2570">_agent.py:2570</span></li>
+          <li>产出一个 <code>RequireUserConfirmEvent</code><span class="src" data-src="src/agentscope/agent/_agent.py:2576">_agent.py:2576</span></li>
+          <li>直接 <code>return</code>，这一轮 reply 进入暂停<span class="src" data-src="src/agentscope/agent/_agent.py:2580">_agent.py:2580</span></li>
+        </ol>
+        <p>
+          <code>reply()</code> 此时返回的消息 <code>finished_reason</code> 是 <code>None</code>，
+          表示「停靠中」，不是失败也不是完成。数据库里别把它当错误。
+        </p>
+        <h3>1. 接收暂停事件</h3>
+        <pre><code>from agentscope.event import RequireUserConfirmEvent
+
+
+async def watch(agent, msg) -&gt; None:
+    async for event in agent.reply_stream(msg):
+        if isinstance(event, RequireUserConfirmEvent):
+            for tc in event.tool_calls:
+                print(tc.name, tc.input)
+                print("建议规则:", tc.suggested_rules)</code></pre>
+        <h3>2. 构造确认结果</h3>
+        <pre><code>from agentscope.event import ConfirmResult, UserConfirmResultEvent
+
+results = [
+    ConfirmResult(
+        confirmed=True,              # 或 False 表示拒绝
+        tool_call=tc,                # 可以修改后再传回
+        rules=tc.suggested_rules,    # 接受后未来同类调用自动放行
+    )
+    for tc in event.tool_calls
+]
+
+confirm_event = UserConfirmResultEvent(
+    reply_id=event.reply_id,
+    confirm_results=results,
+)</code></pre>
+        <h3>3. 恢复</h3>
+        <pre><code>async def resume(agent, confirm_event) -&gt; None:
+    async for follow in agent.reply_stream(confirm_event):
+        ...</code></pre>
+        <p>
+          恢复时，<code>_handle_incoming_event()</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:1955">_agent.py:1955</span>
+          会把确认结果写回状态：
+        </p>
+        <ul>
+          <li>确认 → 工具调用状态改为 <code>ALLOWED</code><span class="src" data-src="src/agentscope/agent/_agent.py:1971">_agent.py:1971</span></li>
+          <li>接受规则 → <code>engine.add_rule()</code> 持久化<span class="src" data-src="src/agentscope/agent/_agent.py:1984">_agent.py:1984</span></li>
+          <li>拒绝 → 生成 <code>DENIED</code> 的工具结果，模型看到「被用户拒绝」<span class="src" data-src="src/agentscope/agent/_agent.py:1988">_agent.py:1988</span></li>
+        </ul>
+        <div class="callout warn">
+          <span class="ct">多个工具只确认了一部分</span>
+          <p>
+            如果一批里有 3 个待确认调用，只传回 1 个，Agent 不会为剩下 2 个重新发请求事件。
+            前端必须自己保存未确认的列表，否则它们会一直停在 <code>ASKING</code>。
+          </p>
+        </div>
+
+        <h2 id="askuser">AskUser：让 Agent 主动问人</h2>
+        <p>
+          <code>AskUser</code>
+          <span class="src" data-src="src/agentscope/tool/_builtin/_ask_user.py:166">_ask_user.py:166</span>
+          是内置的<strong>外部执行工具</strong>（<code>is_external_tool=True</code>
+          <span class="src" data-src="src/agentscope/tool/_builtin/_ask_user.py:211">_ask_user.py:211</span>）。
+          它自己不含任何执行逻辑，只声明「要问什么」。
+        </p>
+        <p>
+          Agent 调用它时会产出 <code>RequireExternalExecutionEvent</code> 并暂停。
+          界面从 <code>tool_calls[].input</code> 里拿到问题结构，渲染成卡片或列表；用户答完后，
+          把一个 <code>ToolResultBlock</code> 放进 <code>ExternalExecutionResultEvent</code> 传回。
+        </p>
+        <pre><code>from agentscope.event import ExternalExecutionResultEvent
+from agentscope.message import TextBlock, ToolResultBlock, ToolResultState
+from agentscope.tool import AskUserAnswer, AskUserMetadata
+
+result = ToolResultBlock(
+    id=tc.id,
+    name=tc.name,
+    output=[TextBlock(text="鉴权方式：OAuth 2.0")],
+    metadata=AskUserMetadata(
+        answers=[
+            AskUserAnswer(
+                question="接入哪种鉴权方式？",
+                selected=["OAuth 2.0"],
+                other=None,
+            ),
+        ],
+    ).model_dump(),
+    state=ToolResultState.SUCCESS,
+)
+
+resume = ExternalExecutionResultEvent(
+    reply_id=event.reply_id,
+    execution_results=[result],
+)</code></pre>
+        <p>
+          <code>output</code> 写给模型读，<code>metadata</code> 按
+          <code>AskUserMetadata</code>
+          <span class="src" data-src="src/agentscope/tool/_builtin/_ask_user.py:131">_ask_user.py:131</span>
+          的结构放同一份答案，供程序按选择分支。一次最多 4 个问题，每个 2–4 个选项
+          <span class="src" data-src="src/agentscope/tool/_builtin/_ask_user.py:148">_ask_user.py:148</span>。
+        </p>
+
+        <h2 id="reject">拒绝之后：模型看到什么</h2>
+        <p>
+          用户点「拒绝」后，框架不会静默跳过，而是生成一条状态为 <code>DENIED</code> 的工具结果，
+          文本大意是「该工具的执行被用户拒绝」。模型会像读普通工具结果一样读到它，然后决定：
+          换个参数、换工具，或者直接向用户解释。
+        </p>
+        <p>
+          如果你希望「被拒绝就停止整轮」，把 <code>ReActConfig.stop_on_reject</code> 设为
+          <code>True</code>
+          <span class="src" data-src="src/agentscope/agent/_config.py:385">_config.py:385</span>；
+          默认是 <code>False</code>，模型可以继续尝试别的办法。
+        </p>
+        <div class="callout tip">
+          <span class="ct">拒绝信息要写清楚</span>
+          <p>
+            拒绝结果里的文本会进模型上下文。与其只写「denied」，不如写「用户拒绝了删除
+            <code>/data</code> 的操作，因为该目录是生产数据」。模型下一轮会据此调整。
+          </p>
+        </div>
+
+        <h2 id="config">配置速查：PermissionContext 与 AgentState</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>默认</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>mode</code></td><td><code>DEFAULT</code></td><td>五种模式之一</td></tr>
+              <tr><td><code>working_directories</code></td><td><code>{}</code></td><td>ACCEPT_EDITS 额外允许的目录</td></tr>
+              <tr><td><code>allow_rules</code></td><td><code>{}</code></td><td>按工具名分组的允许规则</td></tr>
+              <tr><td><code>deny_rules</code></td><td><code>{}</code></td><td>按工具名分组的拒绝规则</td></tr>
+              <tr><td><code>ask_rules</code></td><td><code>{}</code></td><td>按工具名分组的询问规则</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>ACCEPT_EDITS 配合工作目录：</p>
+        <pre><code>from agentscope.permission import AdditionalWorkingDirectory, PermissionContext
+
+PermissionContext(
+    mode=PermissionMode.ACCEPT_EDITS,
+    working_directories={
+        "/my/project": AdditionalWorkingDirectory(
+            path="/my/project",
+            source="userSettings",
+        ),
+    },
+)</code></pre>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>换模式</td><td><code>agent.state.permission_context.mode = PermissionMode.EXPLORE</code></td></tr>
+              <tr><td>允许某类命令</td><td><code>PermissionRule(tool_name="Bash", rule_content="npm run:*", behavior=ALLOW, source=...)</code></td></tr>
+              <tr><td>禁止删文件</td><td><code>rule_content="rm:*"</code> + <code>DENY</code></td></tr>
+              <tr><td>让某工具每次都问</td><td><code>ask_rules</code> + <code>ASK</code></td></tr>
+              <tr><td>无人值守</td><td><code>PermissionMode.DONT_ASK</code></td></tr>
+              <tr><td>接住暂停</td><td><code>RequireUserConfirmEvent</code></td></tr>
+              <tr><td>恢复</td><td><code>UserConfirmResultEvent(reply_id=..., confirm_results=[...])</code></td></tr>
+              <tr><td>主动提问</td><td><code>Toolkit(tools=[AskUser()])</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">用 BYPASS 解决「无人值守」</span>
+          <p>
+            BYPASS 会跳过安全 ASK，<code>rm -rf /</code> 也能执行。无人值守应该是
+            <code>DONT_ASK</code>：只读放行、工作目录内编辑放行、其余 ASK 转 DENY。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">以为 allow 规则能覆盖一切</span>
+          <p>
+            <code>bypass_immune=True</code> 的 ASK 在 DEFAULT / ACCEPT_EDITS 下不受 allow 规则影响。
+            如果某条危险操作仍然被询问，先看工具是不是故意标了安全 ASK。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">把 <code>finished_reason=None</code> 当成失败</span>
+          <p>
+            它是「等待外部交互」的正常状态。前端应该展示确认卡片，而不是报错重试。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">恢复时 <code>reply_id</code> 对不上</span>
+          <p>
+            <code>UserConfirmResultEvent.reply_id</code> 必须与暂停事件一致，否则 Agent 无法把结果
+            关联回等待中的工具调用。跨请求保存时，把 <code>reply_id</code> 一起存。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">用建议规则减少重复确认</span>
+          <p>
+            <code>RequireUserConfirmEvent</code> 里每个工具调用都带 <code>suggested_rules</code>。
+            用户在界面上勾选「以后都允许」，就把这些规则放进 <code>ConfirmResult.rules</code>，
+            引擎会持久化，下一次同类调用自动放行。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li>同时存在 <code>allow: Bash: npm run:*</code> 和 <code>deny: Bash: npm install:*</code>，执行 <code>npm install express</code> 会怎样？</li>
+          <li>安全 ASK 在 DEFAULT、BYPASS、DONT_ASK 下分别变成什么？</li>
+          <li>用户拒绝一个工具后，模型收到的是什么？<code>stop_on_reject</code> 会改变什么？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>用 <code>PermissionMode.EXPLORE</code> 跑一个会写文件的工具，确认它被拒绝而不是询问。</li>
+          <li>写一条 <code>Write</code> 的 allow 规则只放行 <code>src/**</code>，再让 Agent 写 <code>/etc/x</code>，观察结果。</li>
+          <li>实现一个最小的确认循环：捕获 <code>RequireUserConfirmEvent</code>，先拒绝一次，再确认一次，对比模型的两轮回复。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          权限解决了「能不能做」，下一章 <strong>09 流水线</strong> 解决「多个 Agent 怎么按固定逻辑协作」：
+          Pipeline、GoalPipeline 与 TeamPipeline。
+          09 章尚未发布前，可以先回 <a href="07-middleware.html">07 中间件</a> 复习
+          <code>on_check_permission</code> 与 <code>on_acting</code> 的分工。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

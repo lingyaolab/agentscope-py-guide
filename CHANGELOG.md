@@ -2,6 +2,18 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.8.0 — 2026-11-06
+
+新增第 08 章「权限与 HITL」，把「工具能不能执行」讲成可配置、可暂停、可恢复的流程。
+
+- **五种模式**：`DEFAULT` / `ACCEPT_EDITS` / `EXPLORE` / `BYPASS` / `DONT_ASK` 的边界与适用场景。
+- **决策顺序**：deny → ask → 只读 → 工具检查 → allow → 默认 ASK，解释为什么 allow 规则不是最高优先级。
+- **规则**：`PermissionRule` 四字段、Bash 前缀通配、文件 glob、规则字典按工具名分组。
+- **安全 ASK**：`bypass_immune` 在五种模式下的不同处理，以及 BYPASS 为什么挡不住 `rm -rf /`。
+- **HITL**：`RequireUserConfirmEvent` → `ConfirmResult` → `UserConfirmResultEvent` 的完整暂停/恢复。
+- **AskUser**：外部执行工具的问题结构、`AskUserMetadata` 回传、最多 4 题 / 每题 2–4 选项。
+- **拒绝**：`DENIED` 结果如何回到模型，`stop_on_reject` 的作用。
+
 ## v0.7.0 — 2026-11-06
 
 新增第 07 章「中间件」，把横切逻辑从 Agent 源码里搬出来。
