@@ -2,6 +2,18 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.19.0 — 2026-11-07
+
+新增第 19 章「MCP 与技能中心」，把第三方资源变成用户可自助安装的目录。
+
+- **概念**：Hub / Card / 资源池 / 工作区的分工，安装 ≠ 装配。
+- **MCP 中心**：`MCPHubBase` 两个方法、`MCPCard` 字段、`inputs_schema` + `config_template` 占位符。
+- **技能中心**：`SkillHubBase` 三个方法、`SkillCard.markdown`、`SkillArchive` 流式下载。
+- **内置来源**：`GitHubMCPHub` 与 `ClawSkillHub`，以及注册多个 hub 的 `hub_id` 唯一性。
+- **装配**：MCP 进工作区客户端列表，技能解压到 skills 分区；上传限制与重名后缀。
+- **自定义**：两个基类的实现要点、游标分页、`KeyError` → 404、复用 HTTP 客户端。
+- **安全**：按 `user_id` 过滤必须同时覆盖 `list_*` / `get_*` / `download`，凭证字段必须 `writeOnly`。
+
 ## v0.18.0 — 2026-11-07
 
 新增第 18 章「消息渠道」，把 Agent 接进 IM。

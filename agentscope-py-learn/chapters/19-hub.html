@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 MCP 与技能中心：HubBase/MCPHubBase/SkillHubBase、MCPCard 与 SkillCard、安装到资源池、装配到工作区、GitHubMCPHub/ClawSkillHub、自定义中心与安全边界。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="19 MCP 与技能中心：安装、配置与共享 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="HubBase/MCPHubBase/SkillHubBase、MCPCard 与 SkillCard、安装与装配两步、内置中心与自定义中心、安全边界。" />
+    <title>19 MCP 与技能中心：安装、配置与共享 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="19-hub" data-root="..">
+    <main>
+      <article class="article">
+        <h1>19 · MCP 与技能中心</h1>
+        <p class="lede">
+          18 章把 Agent 放进了 IM，用户开始真正使用它。接下来用户会问：
+          「能不能接我的 Notion？」「能不能装一个写周报的技能？」
+          中心（Hub）就是这两个问题的答案：<strong>可浏览的资源目录 + 安装 + 装配</strong>。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>说清 Hub、Card、资源池、工作区四者的关系</li>
+          <li>用 <code>create_app(mcp_hubs=..., skill_hubs=...)</code> 启用中心</li>
+          <li>解释为什么「安装」和「装配」必须分成两步</li>
+          <li>写出一个按用户过滤可见性的自定义中心，并知道要在哪些方法里都过滤</li>
+        </ul>
+
+        <h2 id="why">先说为什么：不要让用户手写配置</h2>
+        <p>
+          没有中心时，用户要接一个 MCP 服务，得自己找 JSON、拼 command / url、填环境变量；
+          要装技能，得克隆仓库、找到 <code>SKILL.md</code>、再上传文件夹。中心把这套流程产品化：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>没有中心</th>
+                <th>有中心</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>用户手写 MCP 配置</td>
+                <td>浏览目录，点安装，按表单填凭证</td>
+              </tr>
+              <tr>
+                <td>每个会话重复填密钥</td>
+                <td>凭证存进资源池，装一次用多处</td>
+              </tr>
+              <tr>
+                <td>不知道有哪些技能</td>
+                <td>搜索、看说明、看 <code>SKILL.md</code> 再装</td>
+              </tr>
+              <tr>
+                <td>平台新增服务要重新部署</td>
+                <td>中心目录更新即可，服务不用动</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="concepts">Hub / Card / 资源池 / 工作区</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>概念</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Hub</strong><span class="src" data-src="src/agentscope/app/hub/_base.py:10">_base.py:10</span></td>
+                <td>一个可浏览的目录，用 <code>hub_id</code> 在路由里寻址；生命周期与进程同长</td>
+              </tr>
+              <tr>
+                <td><strong>Card</strong></td>
+                <td>目录里的一个条目，是<strong>模板</strong>，不是可直接连接的配置</td>
+              </tr>
+              <tr>
+                <td><strong>资源池</strong></td>
+                <td>用户已安装的 MCP / 技能，属于用户而不是会话</td>
+              </tr>
+              <tr>
+                <td><strong>工作区</strong></td>
+                <td>装配目标：MCP 进 workspace 的 MCP 列表，技能进 skills 分区</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          最关键的一句话：<strong>安装 ≠ 装配</strong>。
+        </p>
+
+        <h2 id="mcp">MCP 中心：卡片与安装</h2>
+        <p>
+          <code>MCPHubBase</code>
+          <span class="src" data-src="src/agentscope/app/hub/_mcp/_base.py:9">_base.py:9</span>
+          只有两个抽象方法：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>方法</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>list_mcps(user_id, q, cursor, limit)</code></td><td>浏览一页条目，游标分页</td></tr>
+              <tr><td><code>get_mcp(user_id, card_id)</code></td><td>取单个条目；不存在抛 <code>KeyError</code> → 404</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <code>MCPCard</code>
+          <span class="src" data-src="src/agentscope/app/hub/_mcp/_card.py:10">_card.py:10</span>
+          描述一个服务：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>hub_id</code><span class="src" data-src="src/agentscope/app/hub/_mcp/_card.py:29">_card.py:29</span> / <code>id</code><span class="src" data-src="src/agentscope/app/hub/_mcp/_card.py:34">_card.py:34</span></td><td>全局定位一个条目</td></tr>
+              <tr><td><code>name</code> / <code>display_name</code> / <code>description</code></td><td>展示信息</td></tr>
+              <tr><td><code>is_stateful</code><span class="src" data-src="src/agentscope/app/hub/_mcp/_card.py:132">_card.py:132</span></td><td>是否维持长连接</td></tr>
+              <tr><td><code>auth</code><span class="src" data-src="src/agentscope/app/hub/_mcp/_card.py:141">_card.py:141</span></td><td><code>none</code> 或 <code>inputs</code></td></tr>
+              <tr><td><code>inputs_schema</code><span class="src" data-src="src/agentscope/app/hub/_mcp/_card.py:152">_card.py:152</span></td><td>用户要填的字段，JSON Schema</td></tr>
+              <tr><td><code>config_template</code><span class="src" data-src="src/agentscope/app/hub/_mcp/_card.py:163">_card.py:163</span></td><td>带 <code>${placeholder}</code> 的 Stdio / HTTP 配置模板</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          内置来源是 <code>GitHubMCPHub</code>
+          <span class="src" data-src="src/agentscope/app/hub/_mcp/_github_hub.py:101">_github_hub.py:101</span>，
+          指向 GitHub MCP Registry，匿名可用。
+        </p>
+        <p>
+          用户点安装时，前端根据 <code>inputs_schema</code> 生成表单；提交后服务会<strong>立刻尝试连接</strong>，
+          凭证填错会当场在表单上报错，而不是装出一个用不了的条目。
+        </p>
+
+        <h2 id="skill">技能中心：SKILL.md 与安装</h2>
+        <p>
+          <code>SkillHubBase</code>
+          <span class="src" data-src="src/agentscope/app/hub/_skill/_base.py:26">_base.py:26</span>
+          有三个抽象方法：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>方法</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>list_skills(...)</code></td><td>浏览一页条目，<strong>不带</strong> <code>SKILL.md</code> 正文</td></tr>
+              <tr><td><code>get_skill(...)</code></td><td>取单个条目，带上 <code>SKILL.md</code></td></tr>
+              <tr><td><code>download(...)</code></td><td>返回 <code>SkillArchive(format, stream)</code>，流式读取压缩包</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <code>SkillCard</code>
+          <span class="src" data-src="src/agentscope/app/hub/_skill/_card.py:8">_card.py:8</span>
+          的 <code>markdown</code>
+          <span class="src" data-src="src/agentscope/app/hub/_skill/_card.py:113">_card.py:113</span>
+          就是 <code>SKILL.md</code> 正文；用户可以读完再决定装不装。
+          内置来源是 <code>ClawSkillHub</code>
+          <span class="src" data-src="src/agentscope/app/hub/_skill/_claw_hub.py:75">_claw_hub.py:75</span>。
+        </p>
+        <p>
+          技能安装<strong>不需要填任何内容</strong>，只是加入资源池。装配时才把压缩包拉下来解压到工作区。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>装配来源</th>
+                <th>行为</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>从已安装技能</td><td>那一刻从中心拉取压缩包并解压</td></tr>
+              <tr><td>上传本地文件夹</td><td>根目录必须包含 <code>SKILL.md</code>；最多 100 文件、单文件 50 MB、总计 500 MB</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          文件夹重名时会加数字后缀，不会覆盖已有技能。
+        </p>
+
+        <h2 id="register">注册中心</h2>
+        <p>
+          用 <code>create_app</code> 的两个参数
+          <code>mcp_hubs</code>
+          <span class="src" data-src="src/agentscope/app/_app.py:122">_app.py:122</span>
+          与 <code>skill_hubs</code>
+          <span class="src" data-src="src/agentscope/app/_app.py:123">_app.py:123</span>：
+        </p>
+        <pre><code>from agentscope.app import create_app
+from agentscope.app.hub import ClawSkillHub, GitHubMCPHub
+
+app = create_app(
+    storage=storage,
+    message_bus=message_bus,
+    workspace_manager=workspace_manager,
+    mcp_hubs=[GitHubMCPHub()],
+    skill_hubs=[ClawSkillHub()],
+)</code></pre>
+        <ul>
+          <li>不传对应参数 → 该类型中心关闭，但用户仍可手动粘贴 MCP 配置 / 上传技能文件夹</li>
+          <li>可以注册多个，用不同 <code>hub_id</code> 区分</li>
+          <li>同一类型下 <code>hub_id</code> 重复，服务启动时直接报错</li>
+          <li>Hub 在 lifespan 里进入一次，可以持有 HTTP 客户端复用连接</li>
+        </ul>
+
+        <h2 id="flow">安装与装配：为什么分两步</h2>
+        <pre><code>浏览中心
+   │
+   ├─ 安装 ──▶ 用户资源池（凭证存这里）
+   │              │
+   │              ├─ 装配到工作区 A ──▶ 智能体 A 可用
+   │              ├─ 装配到工作区 B ──▶ 智能体 B 可用
+   │              └─ ...
+   │
+   └─ 不安装，只看</code></pre>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>步骤</th>
+                <th>发生在哪</th>
+                <th>产生什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>安装</td>
+                <td>用户的资源池</td>
+                <td>一条已配置的 MCP / 技能记录，凭证只填一次</td>
+              </tr>
+              <tr>
+                <td>装配</td>
+                <td>某个智能体的工作区</td>
+                <td>MCP 客户端 / 技能目录，工具对智能体可见</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          分开的好处：同一个 MCP 装配到十个工作区，不会问十次密钥；资源池属于用户，
+          不会随会话结束而消失；删除已安装的 MCP 也不影响已经用上它的会话。
+        </p>
+
+        <h2 id="card">卡片：模板与输入项</h2>
+        <p>
+          MCP 卡片的核心是「用占位符描述配置，用 JSON Schema 描述输入」：
+        </p>
+        <pre><code>MCPCard(
+    hub_id=self.hub_id,
+    id="weather",
+    name="weather",
+    display_name="Weather",
+    description="实时天气与预报。",
+    config_template=HttpMCPConfig(
+        url="https://weather.example.com/mcp",
+        headers={"Authorization": "Bearer ${api_key}"},
+    ),
+    inputs_schema={
+        "type": "object",
+        "required": ["api_key"],
+        "properties": {
+            "api_key": {
+                "type": "string",
+                "title": "API 密钥",
+                "writeOnly": True,
+                "format": "password",
+            },
+        },
+    },
+)</code></pre>
+        <div class="callout warn">
+          <span class="ct">凭证字段必须 writeOnly + password</span>
+          <p>
+            前端据此渲染密码框，并在用户再次编辑时留空。漏标会让密钥回传到浏览器。
+          </p>
+        </div>
+        <p>
+          <code>${placeholder}</code> 在任意字符串里都有效：URL、请求头、环境变量、命令行参数。
+        </p>
+
+        <h2 id="custom">自定义中心</h2>
+        <h3>自定义 MCP 中心</h3>
+        <pre><code>from agentscope.app.hub import MCPCard, MCPHubBase, MCPHubPage
+
+
+class InternalMCPHub(MCPHubBase):
+    def __init__(self) -&gt; None:
+        super().__init__(
+            hub_id="internal",
+            display_name="内部 MCP 目录",
+            description="由平台团队审核发布的 MCP 服务。",
+        )
+
+    async def list_mcps(self, user_id, q=None, cursor=None, limit=20):
+        page = await fetch_our_catalog(query=q, after=cursor, limit=limit)
+        return MCPHubPage(
+            cards=[self._to_card(c) for c in page.items],
+            next_cursor=page.next_cursor,
+        )
+
+    async def get_mcp(self, user_id: str, card_id: str) -&gt; MCPCard:
+        return self._to_card(await fetch_one(card_id))</code></pre>
+        <h3>自定义技能中心</h3>
+        <pre><code>from agentscope.app.hub import SkillArchive, SkillCard, SkillHubBase, SkillHubPage
+
+
+class InternalSkillHub(SkillHubBase):
+    def __init__(self) -&gt; None:
+        super().__init__(
+            hub_id="internal",
+            display_name="内部技能目录",
+            description="由平台团队发布的技能。",
+        )
+
+    async def list_skills(self, user_id, q=None, cursor=None, limit=20):
+        page = await fetch_our_catalog(query=q, after=cursor, limit=limit)
+        return SkillHubPage(
+            cards=[self._to_card(c) for c in page.items],
+            next_cursor=page.next_cursor,
+        )
+
+    async def get_skill(self, user_id: str, card_id: str) -&gt; SkillCard:
+        detail = await fetch_one(card_id)
+        return self._to_card(detail, markdown=detail.readme)
+
+    async def download(self, user_id, card_id, version=None) -&gt; SkillArchive:
+        response = await self._client.get(f"/skills/{card_id}/archive")
+        return SkillArchive(format="tar.gz", stream=response.aiter_bytes())</code></pre>
+        <p>
+          Hub 实例生命周期与进程同长，可以复用一个 HTTP 客户端：实现
+          <code>__aenter__</code> / <code>__aexit__</code>，服务启动时进入、关闭时退出。
+        </p>
+
+        <h2 id="security">安全：可见性与访问控制</h2>
+        <p>
+          三个方法的第一个参数都是 <code>user_id</code>，不是摆设：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>位置</th>
+                <th>规则</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>list_*</code></td><td>只返回该用户可见的卡片</td></tr>
+              <tr><td><code>get_*</code></td><td>对隐藏条目也抛 <code>KeyError</code>，否则猜 id 就能绕过</td></tr>
+              <tr><td><code>download</code></td><td>技能包下载也要按 <code>user_id</code> 校验，理由同上</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct">只在列表里过滤不算访问控制</span>
+          <p>
+            调用方可以直接请求任意 <code>card_id</code>。可见性必须同时应用在
+            <code>get_*</code> 与 <code>download</code> 上。
+          </p>
+        </div>
+        <p>
+          另外：MCP 凭据加密保存、返回时脱敏；技能里的脚本仍受工作区权限与权限系统约束；
+          中心是第三方来源，接入前要评估可信度。
+        </p>
+
+        <h2 id="compare">MCP 中心 vs 技能中心</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>维度</th>
+                <th>MCP 中心</th>
+                <th>技能中心</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>资源形态</td>
+                <td>一个可连接的服务</td>
+                <td>一个文件夹 + <code>SKILL.md</code> + 脚本</td>
+              </tr>
+              <tr>
+                <td>安装时填什么</td>
+                <td>凭证 / 配置（<code>inputs_schema</code>）</td>
+                <td>不填，只加入资源池</td>
+              </tr>
+              <tr>
+                <td>装配时做什么</td>
+                <td>创建 MCP 客户端，放进工作区</td>
+                <td>拉压缩包、解压到 skills 分区</td>
+              </tr>
+              <tr>
+                <td>运行位置</td>
+                <td>工作区后端（本地 / 沙箱）</td>
+                <td>工作区文件系统，由 Skill 查看器读取</td>
+              </tr>
+              <tr>
+                <td>更新</td>
+                <td>重装 / 轮换密钥</td>
+                <td>重新拉取最新压缩包</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>启用 MCP 中心</td><td><code>create_app(mcp_hubs=[GitHubMCPHub()])</code></td></tr>
+              <tr><td>启用技能中心</td><td><code>create_app(skill_hubs=[ClawSkillHub()])</code></td></tr>
+              <tr><td>自定义 MCP 目录</td><td>继承 <code>MCPHubBase</code>，实现 <code>list_mcps</code> / <code>get_mcp</code></td></tr>
+              <tr><td>自定义技能目录</td><td>继承 <code>SkillHubBase</code>，实现三个方法</td></tr>
+              <tr><td>按用户过滤</td><td>三个方法都按 <code>user_id</code> 过滤</td></tr>
+              <tr><td>声明输入</td><td><code>inputs_schema</code> + <code>config_template</code></td></tr>
+              <tr><td>隐藏凭证</td><td><code>writeOnly: true</code> + <code>format: password</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">把「安装」当「装配」</span>
+          <p>
+            安装只进资源池，不会让智能体立刻拿到工具。还要在工作区里装配一次。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct"><code>hub_id</code> 重复</span>
+          <p>
+            同一类型下 hub_id 必须唯一，否则服务启动直接报错。多目录用
+            <code>github</code> / <code>internal</code> 这种清晰前缀。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct"><code>list_skills</code> 里拉 <code>SKILL.md</code></span>
+          <p>
+            一页 20 条就是 20 次请求，很容易触发限流。列表只返回卡片元数据，
+            正文放在 <code>get_skill</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">只在 <code>list_*</code> 做可见性</span>
+          <p>
+            <code>get_*</code> 与 <code>download</code> 都能被猜测 id 直接调用。
+            三处都要过滤，否则等于没有访问控制。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">凭证字段没标 <code>writeOnly</code></span>
+          <p>
+            浏览器会拿到密钥。所有凭证字段都要 <code>"writeOnly": true</code> 与
+            <code>"format": "password"</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">技能包根目录没有 <code>SKILL.md</code></span>
+          <p>
+            解压后找不到技能定义，装配失败。压缩包要么是单个顶层文件夹，要么直接是文件，
+            但根目录必须有 <code>SKILL.md</code>。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">装配技能时中心不可达</span>
+          <p>
+            该技能会单独报错，同一请求中的其他技能照常装配。安装只存描述，不存文件副本，
+            所以每次装配都要能访问中心。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li>为什么安装和装配要分成两步？凭证在什么时候填？</li>
+          <li><code>get_mcp</code> / <code>download</code> 为什么也要按 <code>user_id</code> 过滤？</li>
+          <li>MCP 卡片和技能卡片在「安装时要不要填东西」上有什么不同？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>用 <code>create_app</code> 注册 <code>GitHubMCPHub</code>，通过前端安装一个 MCP 服务，再装配到一个会话。</li>
+          <li>注册 <code>ClawSkillHub</code>，安装一个技能，观察「安装」和「装配」两个按钮的区别。</li>
+          <li>写一个只对特定 <code>user_id</code> 可见的 <code>MCPHubBase</code> 子类，确认另一个用户拿不到卡片。</li>
+          <li>给卡片加一个 <code>api_key</code> 输入，检查前端是否渲染成密码框。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          中心让用户可以自助扩展 Agent 的能力。下一章 <strong>20 资源与多租户</strong> 讲更底层的问题：
+          凭证、Agent、知识库怎么在用户组 / 组织之间共享，以及访问策略怎么定。
+          20 章尚未发布前，可以先回 <a href="15-agent-service.html">15 Agent Service</a>
+          复习多租户与 <code>resource_access_policy</code>。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
