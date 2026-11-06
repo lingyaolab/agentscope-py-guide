@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 资源与多租户：ResourceKind/ResourcePermission/ResourceRef、ResourceAccessPolicyBase、ResourceAccessService、默认 DenyAll、凭证脱敏、Agent 配置共享与知识库共享。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="20 资源与多租户：凭证、Agent、知识库共享 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="ResourceKind/ResourcePermission/ResourceRef、访问策略两个方法、默认 DenyAll、凭证脱敏、Agent 配置共享与知识库共享。" />
+    <title>20 资源与多租户：凭证、Agent、知识库共享 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="20-sharing" data-root="..">
+    <main>
+      <article class="article">
+        <h1>20 · 资源与多租户</h1>
+        <p class="lede">
+          15 章说每个请求都解析出 <code>user_id</code>，资源严格按用户隔离。但真实组织里，
+          API key 是团队共用、Agent 要发布给部门、知识库要大家共建。
+          这一章讲 AgentScope 怎么在不引入用户/群组模型的前提下，把资源共享做安全。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>说清 <code>ResourceKind</code>、<code>ResourcePermission</code>、<code>ResourceRef</code> 三个类型</li>
+          <li>实现 <code>ResourceAccessPolicyBase</code> 并接到 <code>create_app</code></li>
+          <li>解释为什么共享凭证永远不会把密钥返回给访问者</li>
+          <li>知道共享 Agent 时哪些东西<strong>不</strong>共享</li>
+        </ul>
+
+        <h2 id="why">先说为什么：多租户不是「加个 user_id」</h2>
+        <p>
+          默认隔离很容易：每条记录带 <code>user_id</code>，查询时按它过滤。但一旦要共享，问题就变成：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>问题</th>
+                <th>不能怎么答</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>谁能看到这个 Agent？</td>
+                <td>在服务里建一套用户/群组表 —— 会和公司现有 IAM 重复</td>
+              </tr>
+              <tr>
+                <td>共享的 key 会不会泄露？</td>
+                <td>把凭证记录原样返回 —— 等于把密钥发给所有人</td>
+              </tr>
+              <tr>
+                <td>只读和可编辑怎么区分？</td>
+                <td>再加一个布尔字段 —— 很快就会不够用</td>
+              </tr>
+              <tr>
+                <td>共享的 Agent 带不带原主人的工具和记忆？</td>
+                <td>想当然地「一起共享」—— 会串数据</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          AgentScope 的答案是：<strong>服务不建模用户关系，只提供一个策略接口</strong>，
+          由部署者把任何身份系统（IAM、LDAP、配置、数据库）映射成资源引用。
+        </p>
+
+        <h2 id="model">三类可共享资源</h2>
+        <p>
+          <code>ResourceKind</code>
+          <span class="src" data-src="src/agentscope/app/access/_policy.py:19">_policy.py:19</span>
+          只有三个值：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>资源</th>
+                <th>共享后对方能做什么</th>
+                <th>不能做什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>CREDENTIAL</code><span class="src" data-src="src/agentscope/app/access/_policy.py:22">_policy.py:22</span></td>
+                <td>用自己的会话使用该凭证调用模型</td>
+                <td>看到密钥原文</td>
+              </tr>
+              <tr>
+                <td><code>AGENT</code><span class="src" data-src="src/agentscope/app/access/_policy.py:25">_policy.py:25</span></td>
+                <td>基于该配置创建会话、直接对话</td>
+                <td>继承原主人的工作区内容</td>
+              </tr>
+              <tr>
+                <td><code>KNOWLEDGE_BASE</code><span class="src" data-src="src/agentscope/app/access/_policy.py:28">_policy.py:28</span></td>
+                <td>检索、引用其中的文档</td>
+                <td>在只读权限下修改文档</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          权限只有两级：<code>READ</code> 与 <code>EDIT</code>
+          <span class="src" data-src="src/agentscope/app/access/_policy.py:32">_policy.py:32</span>。
+          <code>EDIT</code> 隐含 <code>READ</code>
+          <span class="src" data-src="src/agentscope/app/access/_policy.py:44">_policy.py:44</span>。
+        </p>
+
+        <h2 id="refs">ResourceRef：共享关系的四条信息</h2>
+        <p>
+          一个 <code>ResourceRef</code>
+          <span class="src" data-src="src/agentscope/app/access/_policy.py:51">_policy.py:51</span>
+          就是一条授权：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>kind</code><span class="src" data-src="src/agentscope/app/access/_policy.py:60">_policy.py:60</span></td><td>凭证 / Agent / 知识库</td></tr>
+              <tr><td><code>owner_id</code><span class="src" data-src="src/agentscope/app/access/_policy.py:63">_policy.py:63</span></td><td>资源属主的 <code>user_id</code></td></tr>
+              <tr><td><code>resource_id</code><span class="src" data-src="src/agentscope/app/access/_policy.py:68">_policy.py:68</span></td><td>属主下的资源 ID</td></tr>
+              <tr><td><code>permission</code><span class="src" data-src="src/agentscope/app/access/_policy.py:73">_policy.py:73</span></td><td><code>READ</code> 或 <code>EDIT</code>，默认 <code>READ</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          注意：<code>list_accessible</code> 只返回<strong>跨属主</strong>的资源。
+          访问者自己的资源由服务从存储里合并，不需要策略重复返回。
+        </p>
+
+        <h2 id="policy">ResourceAccessPolicyBase：两个方法</h2>
+        <p>
+          <code>ResourceAccessPolicyBase</code>
+          <span class="src" data-src="src/agentscope/app/access/_policy.py:79">_policy.py:79</span>
+          只有两件事：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>方法</th>
+                <th>必需</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>list_accessible(viewer_id, kind, storage)</code><span class="src" data-src="src/agentscope/app/access/_policy.py:91">_policy.py:91</span></td>
+                <td>是（抽象）</td>
+                <td>返回访问者可见的跨属主资源</td>
+              </tr>
+              <tr>
+                <td><code>can_edit(viewer_id, kind, owner_id, resource_id, storage)</code><span class="src" data-src="src/agentscope/app/access/_policy.py:114">_policy.py:114</span></td>
+                <td>否</td>
+                <td>是否可修改；默认从 <code>list_accessible</code> 推导</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <code>can_edit</code> 的默认实现很直接：属主永远可编辑
+          <span class="src" data-src="src/agentscope/app/access/_policy.py:140">_policy.py:140</span>；
+          否则在 <code>list_accessible</code> 里找匹配的 <code>EDIT</code> 引用
+          <span class="src" data-src="src/agentscope/app/access/_policy.py:143">_policy.py:143</span>。
+          如果你的 IAM 有更直接的权限查询，覆写它会更高效。
+        </p>
+        <p>
+          两个方法都会收到 <code>storage</code>，可以用于只读查询；策略本身<strong>不</strong>在 AgentScope
+          存储里维护用户、群组、成员关系。
+        </p>
+
+        <h2 id="default">默认策略：DenyAll</h2>
+        <p>
+          不传策略时，服务安装 <code>DenyAllResourceAccessPolicy</code>
+          <span class="src" data-src="src/agentscope/app/access/_policy.py:153">_policy.py:153</span>，
+          <code>list_accessible</code> 永远返回空
+          <span class="src" data-src="src/agentscope/app/access/_policy.py:156">_policy.py:156</span>。
+          也就是 15 章说的严格按用户隔离。
+        </p>
+        <pre><code>app = create_app(
+    storage=storage,
+    message_bus=message_bus,
+    workspace_manager=workspace_manager,
+    # 不传 = DenyAll
+)</code></pre>
+        <p>
+          <code>create_app</code> 的参数在
+          <span class="src" data-src="src/agentscope/app/_app.py:133">_app.py:133</span>，
+          默认值在
+          <span class="src" data-src="src/agentscope/app/_app.py:344">_app.py:344</span> 生效。
+        </p>
+
+        <h2 id="resolve">解析链：list / get / 运行时</h2>
+        <p>
+          <code>ResourceAccessService</code>
+          <span class="src" data-src="src/agentscope/app/_service/_access.py:204">_access.py:204</span>
+          把存储与策略拼起来，提供三类入口：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>入口</th>
+                <th>用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>list_resource(...)</code><span class="src" data-src="src/agentscope/app/_service/_access.py:232">_access.py:232</span></td><td>列表：自己的 + 策略返回的共享资源</td></tr>
+              <tr><td><code>get_resource(...)</code><span class="src" data-src="src/agentscope/app/_service/_access.py:324">_access.py:324</span></td><td>单条读取，同样合并两种来源</td></tr>
+              <tr><td><code>resolve_credential</code> / <code>resolve_agent</code> / <code>resolve_knowledge_base</code></td><td>运行时按 <code>(owner_id, resource_id)</code> 加载真实记录</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          运行时的解析方法分别是
+          <span class="src" data-src="src/agentscope/app/_service/_access.py:410">_access.py:410</span>、
+          <span class="src" data-src="src/agentscope/app/_service/_access.py:437">_access.py:437</span>、
+          <span class="src" data-src="src/agentscope/app/_service/_access.py:480">_access.py:480</span>。
+          写操作前会调用 <code>resolve_for_edit</code>
+          <span class="src" data-src="src/agentscope/app/_service/_access.py:516">_access.py:516</span>。
+        </p>
+
+        <h2 id="editable">editable 视图：403 与 404 的区别</h2>
+        <p>
+          返回给前端的资源视图带一个 <code>editable</code> 标志，由引用权限算出。
+          这样前端不用再发一次鉴权请求，就能决定渲染只读还是可编辑。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>情况</th>
+                <th>结果</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>只读共享，尝试 PATCH / DELETE</td><td><code>403</code></td></tr>
+              <tr><td>完全不可见</td><td><code>404</code></td></tr>
+              <tr><td>可编辑共享</td><td>正常修改</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          这个区分很重要：<code>404</code> 不泄露「这个资源存在但你没权限」，
+          <code>403</code> 则明确告诉前端「你能看，但不能改」。
+        </p>
+
+        <h2 id="credential">凭证共享：可以用，永远看不到</h2>
+        <p>
+          共享凭证只把「使用能力」给出去，不把密钥给出去：
+        </p>
+        <ul>
+          <li>所有 list / get 响应里，凭证都<strong>脱敏</strong>，只显示 <code>type</code> 与 <code>name</code></li>
+          <li>原始密钥只在运行时构造 chat / embedding / TTS 模型时解析</li>
+          <li>不要新增任何把已解析凭证返回给客户端的端点</li>
+        </ul>
+        <pre><code>ResourceRef(
+    kind=ResourceKind.CREDENTIAL,
+    owner_id="alice",
+    resource_id="cred-openai-prod",
+    permission=ResourcePermission.READ,
+)</code></pre>
+        <p>
+          Bob 可以用这个凭证建会话、跑模型，但在任何 API 响应里都看不到 key。
+        </p>
+
+        <h2 id="agent">Agent 共享：共享配置，不共享工作区</h2>
+        <p>
+          共享一个 Agent，共享的是它的<strong>配置</strong>：显示名、系统提示、context / ReAct 设置。
+        </p>
+        <div class="callout warn">
+          <span class="ct">工作区内容不会跟着共享</span>
+          <p>
+            MCP 客户端配置、技能、累积的记忆（<code>MEMORY.md</code>）都在按用户隔离的 workspace 里。
+            共享的 Agent 对每个访问者都是<strong>从干净 workspace 开始</strong>，不会继承属主的工具与记忆。
+            这是当前已知的缺口。
+          </p>
+        </div>
+        <p>
+          另外，如果 Agent 开启了 <code>Invitable</code>，访问者的 Leader 还可以用
+          <code>AgentInvite</code> 把它邀请进团队（17 章）。
+        </p>
+
+        <h2 id="kb">知识库共享：检索与共建</h2>
+        <p>
+          <code>ResourceKind.KNOWLEDGE_BASE</code> 的 <code>READ</code> 表示可以检索、引用文档；
+          <code>EDIT</code> 表示还可以修改知识库与文档。
+        </p>
+        <pre><code>ResourceRef(
+    kind=ResourceKind.KNOWLEDGE_BASE,
+    owner_id="alice",
+    resource_id="kb-handbook",
+    permission=ResourcePermission.READ,
+)</code></pre>
+        <p>
+          知识库功能本身要启用 <code>knowledge_base_manager</code>（15 章），否则共享也无处落地。
+        </p>
+
+        <h2 id="impl">实现策略：接 IAM / LDAP / 配置</h2>
+        <p>
+          子类只需要把「访问者能触达谁」翻译成 <code>ResourceRef</code>：
+        </p>
+        <pre><code>from agentscope.app.access import (
+    ResourceAccessPolicyBase,
+    ResourceKind,
+    ResourceRef,
+)
+from agentscope.app.storage import StorageBase
+
+
+class TeamResourceAccessPolicy(ResourceAccessPolicyBase):
+    async def list_accessible(
+        self,
+        viewer_id: str,
+        kind: ResourceKind,
+        storage: StorageBase,
+    ) -&gt; list[ResourceRef]:
+        refs = []
+        for owner_id, resource_id, permission in await my_team_grants(
+            viewer_id,
+            kind,
+        ):
+            refs.append(
+                ResourceRef(
+                    kind=kind,
+                    owner_id=owner_id,
+                    resource_id=resource_id,
+                    permission=permission,
+                ),
+            )
+        return refs
+
+    async def can_edit(
+        self,
+        viewer_id: str,
+        kind: ResourceKind,
+        owner_id: str,
+        resource_id: str,
+        storage: StorageBase,
+    ) -&gt; bool:
+        if await my_is_team_admin(viewer_id, owner_id):
+            return True
+        return await super().can_edit(
+            viewer_id,
+            kind,
+            owner_id,
+            resource_id,
+            storage,
+        )</code></pre>
+        <pre><code>app = create_app(
+    storage=storage,
+    message_bus=message_bus,
+    workspace_manager=workspace_manager,
+    resource_access_policy=TeamResourceAccessPolicy(),
+)</code></pre>
+        <div class="callout tip">
+          <span class="ct">策略可以是纯配置</span>
+          <p>
+            不必接 IAM。开发环境用一份字典把 <code>viewer_id</code> 映射到资源列表就够了；
+            生产再换成 LDAP / 数据库查询。
+          </p>
+        </div>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>保持严格隔离</td><td>不传 <code>resource_access_policy</code></td></tr>
+              <tr><td>共享只读</td><td><code>permission=ResourcePermission.READ</code></td></tr>
+              <tr><td>共享可编辑</td><td><code>permission=ResourcePermission.EDIT</code></td></tr>
+              <tr><td>实现策略</td><td>继承 <code>ResourceAccessPolicyBase</code>，实现 <code>list_accessible</code></td></tr>
+              <tr><td>安装策略</td><td><code>create_app(resource_access_policy=...)</code></td></tr>
+              <tr><td>判断前端只读</td><td>读返回视图的 <code>editable</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">在 <code>list_accessible</code> 里返回自己的资源</span>
+          <p>
+            服务会把访问者自己的资源再合并一次，导致重复。策略只返回跨属主的部分。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">忘了按 <code>kind</code> 过滤</span>
+          <p>
+            一次调用只问一种资源类型。把凭证、Agent、知识库混在一个列表里返回，
+            会导致鉴权错位。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">以为策略装了就会自动共享</span>
+          <p>
+            策略只负责「谁可见」。没有引用、没有配置，默认还是 <code>DenyAll</code> 的效果。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">自定义端点返回已解析凭证</span>
+          <p>
+            共享凭证的唯一安全边界是「只在运行时解析」。任何把 key 返回给客户端的接口
+            都会把整套设计毁掉。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">以为共享 Agent 会带工具和记忆</span>
+          <p>
+            workspace 是按用户隔离的。共享的 Agent 对访问者是干净环境，MCP、技能、
+            <code>MEMORY.md</code> 都不会跟过去。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">用 <code>editable</code> 驱动 UI</span>
+          <p>
+            前端不需要自己猜权限：列表已经返回 <code>editable</code>。
+            只有 <code>READ</code> 的条目就不要渲染编辑与删除按钮。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li><code>list_accessible</code> 为什么不能返回访问者自己的资源？</li>
+          <li>共享凭证后，访问者能看到密钥吗？密钥在什么时候被解析？</li>
+          <li>只读共享的资源被 PATCH 和完全不可见的资源被 GET，分别返回什么状态码？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>写一个基于字典的 <code>ResourceAccessPolicyBase</code>，把 alice 的凭证共享给 bob。</li>
+          <li>用 bob 的身份列出凭证，确认能看到名字但看不到 key。</li>
+          <li>把权限从 <code>READ</code> 改成 <code>EDIT</code>，确认 <code>editable</code> 与 PATCH 行为变化。</li>
+          <li>共享一个 Agent 给 bob，确认 bob 的会话没有继承 alice 的 MCP 与技能。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          多租户与共享讲完了。下一章 <strong>21 可观测性</strong> 讲怎么知道线上发生了什么：
+          OpenTelemetry 链路、span 结构、token 与成本。
+          21 章尚未发布前，可以先回 <a href="15-agent-service.html">15 Agent Service</a>
+          复习 <code>resource_access_policy</code> 的默认值。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

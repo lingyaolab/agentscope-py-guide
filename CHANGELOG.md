@@ -2,6 +2,20 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.20.0 — 2026-11-07
+
+新增第 20 章「资源与多租户」，把「共享但不泄露」讲清楚。
+
+- **三类资源**：`CREDENTIAL` / `AGENT` / `KNOWLEDGE_BASE`，两级权限 `READ` / `EDIT`。
+- **引用**：`ResourceRef` 的四个字段，`EDIT` 隐含 `READ`。
+- **策略**：`ResourceAccessPolicyBase` 的 `list_accessible`（必需）与 `can_edit`（可选，默认从引用推导）。
+- **默认**：`DenyAllResourceAccessPolicy`，跨用户完全隔离。
+- **解析链**：`ResourceAccessService` 的 list / get / 运行时解析 / 编辑前校验。
+- **视图**：`editable` 标志、只读修改 403、不可见 404。
+- **凭证**：列表与详情永远脱敏，密钥只在运行时解析。
+- **Agent**：只共享配置，workspace / MCP / 技能 / 记忆不共享（已知缺口）。
+- **知识库**：`READ` 检索，`EDIT` 才能改。
+
 ## v0.19.0 — 2026-11-07
 
 新增第 19 章「MCP 与技能中心」，把第三方资源变成用户可自助安装的目录。
