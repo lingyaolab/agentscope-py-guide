@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 RAG 与长期记忆：Parser/Chunker/Embedding/VectorStore/KnowledgeBase 五模块、索引与检索、RAGMiddleware 的 static/agentic 模式、重排，以及 Agentic/ReMe/Mem0 三种记忆中间件。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="11 RAG 与长期记忆：知识库、检索与跨会话记忆 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="Parser/Chunker/Embedding/VectorStore/KnowledgeBase 五模块、索引与检索、RAGMiddleware 的 static/agentic 模式、重排，以及三种记忆中间件。" />
+    <title>11 RAG 与长期记忆：知识库、检索与跨会话记忆 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="11-rag-memory" data-root="..">
+    <main>
+      <article class="article">
+        <h1>11 · RAG 与长期记忆</h1>
+        <p class="lede">
+          06 章的上下文管理解决「这一轮装不下」。这一章解决两个不同的问题：
+          <strong>RAG</strong> 让模型在回答前查到外部文档，<strong>长期记忆</strong>让它跨会话记住用户偏好与历史决策。
+          两者都通过中间件接入，但存储、触发时机和隔离维度完全不同。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>说清 RAG 的五个可替换模块，以及 <code>KnowledgeBase</code> 绑定了什么</li>
+          <li>完成一次「解析 → 切分 → 嵌入入库 → 检索」的闭环</li>
+          <li>选择 <code>RAGMiddleware</code> 的 static / agentic 模式，并知道工具要手动注册</li>
+          <li>区分 Agentic Memory、ReMe、Mem0 三种长期记忆的存储与写入方式</li>
+        </ul>
+
+        <h2 id="why">先说为什么：RAG 不是「把文档塞进提示词」</h2>
+        <p>
+          把整份文档放进系统提示有三个问题：贵（每次都付全量 token）、慢、而且模型会在一大段文本里迷失。
+          RAG 的做法是<strong>先检索、再注入</strong>：只把和当前问题最相关的几个片段放进上下文。
+        </p>
+        <div class="stack">
+          <div class="layer accent">
+            <span class="lt">离线：索引</span>
+            <div class="ld">文件 → 解析成 Section → 切成 Chunk → 嵌入成向量 → 写进向量库。慢，但只做一次。</div>
+          </div>
+          <div class="layer in2">
+            <span class="lt">在线：检索</span>
+            <div class="ld">查询 → 嵌入 → 向量检索 → 去重排序 → 取 top_k。每次提问都做。</div>
+          </div>
+          <div class="layer in3">
+            <span class="lt">接入：中间件</span>
+            <div class="ld">检索结果包成 <code>HintBlock</code> 注入，或暴露成工具让模型自己调。</div>
+          </div>
+        </div>
+        <p>
+          长期记忆是另一条线：它不是「文档」，而是<strong>从对话里沉淀下来的事实</strong>——
+          用户住哪儿、偏好什么、上次做了什么决定。它的写入发生在回复之后，检索发生在回复之前或模型主动调用时。
+        </p>
+
+        <h2 id="modules">五个可替换模块：Parser / Chunker / Embedding / Store / KnowledgeBase</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>模块</th>
+                <th>职责</th>
+                <th>内置实现</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Parser</td>
+                <td>原始文件 → <code>Section</code>，按自然边界切（PDF 页、PPT 幻灯片、Markdown 段）</td>
+                <td><code>TextParser</code>、<code>PDFParser</code>、<code>PPTParser</code>、<code>WordParser</code>、<code>ExcelParser</code>、<code>ImageParser</code></td>
+              </tr>
+              <tr>
+                <td>Chunker</td>
+                <td><code>Section</code> → <code>Chunk</code>，不跨 Section 合并</td>
+                <td><code>ApproxTokenChunker</code></td>
+              </tr>
+              <tr>
+                <td>Embedding</td>
+                <td><code>Chunk</code> → 向量</td>
+                <td><code>DashScopeEmbeddingModel</code> 等</td>
+              </tr>
+              <tr>
+                <td>Vector Store</td>
+                <td>存向量与元信息，支持检索</td>
+                <td><code>QdrantStore</code>、<code>MilvusLiteStore</code>、<code>MongoDBStore</code>、<code>ElasticsearchStore</code></td>
+              </tr>
+              <tr>
+                <td>KnowledgeBase</td>
+                <td>把嵌入模型 + 向量库 + collection 绑在一起</td>
+                <td><code>KnowledgeBase</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <code>Section</code>
+          <span class="src" data-src="src/agentscope/rag/_document.py:31">_document.py:31</span>
+          和 <code>Chunk</code>
+          <span class="src" data-src="src/agentscope/rag/_document.py:71">_document.py:71</span>
+          都是 Pydantic 模型。Chunk 比 Section 多两个字段：
+          <code>chunk_index</code> 和 <code>total_chunks</code>，用于后续去重与展示。
+        </p>
+        <p>
+          <code>KnowledgeBase</code>
+          <span class="src" data-src="src/agentscope/rag/_knowledge.py:44">_knowledge.py:44</span>
+          的构造函数
+          <span class="src" data-src="src/agentscope/rag/_knowledge.py:74">_knowledge.py:74</span>
+          只有六个参数：<code>name</code>、<code>description</code>、<code>embedding_model</code>、
+          <code>vector_store</code>、<code>collection</code>、<code>metadata_filter</code>。
+        </p>
+        <div class="callout warn">
+          <span class="ct">KnowledgeBase 不管理向量库连接</span>
+          <p>
+            <code>vector_store</code> 必须已经进入 <code>async with</code> 上下文。KnowledgeBase 只负责
+            「用这个库、这个 collection」，不负责打开或关闭连接。
+          </p>
+        </div>
+
+        <h2 id="index">索引三步：解析 → 切分 → 入库</h2>
+        <pre><code>from agentscope.credential import DashScopeCredential
+from agentscope.embedding import DashScopeEmbeddingModel
+from agentscope.rag import ApproxTokenChunker, KnowledgeBase, TextParser
+
+
+async def index_docs(store) -&gt; str:
+    parser = TextParser()
+    sections = await parser.parse(
+        file=b"# Cats\nCats sleep 12-16 hours per day.\n",
+        filename="cats.md",
+    )
+
+    chunker = ApproxTokenChunker(
+        parameters=ApproxTokenChunker.Parameters(
+            chunk_size=256,
+            overlap=32,
+        ),
+    )
+    chunks = await chunker.chunk(sections)
+
+    embedding_model = DashScopeEmbeddingModel(
+        credential=DashScopeCredential(api_key="YOUR_API_KEY"),
+        model="text-embedding-v4",
+        dimensions=1024,
+    )
+
+    kb = KnowledgeBase(
+        name="demo-kb",
+        description="A toy corpus about cats.",
+        embedding_model=embedding_model,
+        vector_store=store,          # 必须已经在 async with 里
+        collection="demo-kb",
+    )
+
+    return await kb.insert_document(
+        chunks,
+        document_metadata={"filename": "cats.md"},
+    )</code></pre>
+        <p>
+          同一文档的所有 chunk 共享一个 <code>document_id</code>，后续可以按文档整体删除。
+          collection 会在第一次操作时按 <code>embedding_model.dimensions</code> 懒创建。
+        </p>
+        <p>
+          <code>parse(file, filename)</code> 的 <code>file</code> 既可以是 <code>bytes</code>，
+          也可以是路径字符串。二进制解析器把字符串当路径；<code>TextParser</code> 会先判断这个字符串
+          是不是存在的文件。
+        </p>
+
+        <h2 id="embedding">嵌入模型：维度与多模态</h2>
+        <p>
+          <code>EmbeddingModelBase</code>
+          <span class="src" data-src="src/agentscope/embedding/_embedding_base.py:34">_embedding_base.py:34</span>
+          有两个关键属性：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>属性</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>dimensions</code><span class="src" data-src="src/agentscope/embedding/_embedding_base.py:78">_embedding_base.py:78</span></td>
+                <td>向量维度；必须和向量库 collection 的维度一致</td>
+              </tr>
+              <tr>
+                <td><code>supports_multimodal</code><span class="src" data-src="src/agentscope/embedding/_embedding_base.py:98">_embedding_base.py:98</span></td>
+                <td>能否直接嵌入图片 / 音频等 <code>DataBlock</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          索引和检索必须用<strong>同一个嵌入模型</strong>。换了模型就要重新入库，否则向量不可比。
+          如果模型不支持多模态，<code>KnowledgeBase.search</code> 会静默丢弃
+          <code>DataBlock</code> 查询，不会报错。
+        </p>
+
+        <h2 id="search">检索：top_k、阈值与去重</h2>
+        <pre><code>async def ask(kb) -&gt; None:
+    results = await kb.search(
+        queries=["When do cats sleep?"],
+        top_k=3,
+        score_threshold=None,
+    )
+    for r in results:
+        print(r.score, r.document_id, r.chunk.content)</code></pre>
+        <p>
+          <code>search</code>
+          <span class="src" data-src="src/agentscope/rag/_knowledge.py:197">_knowledge.py:197</span>
+          内部做了四件事：
+        </p>
+        <ol>
+          <li>过滤不可用查询（嵌入模型不支持多模态时丢掉 <code>DataBlock</code>）</li>
+          <li>所有查询批量嵌入，再并发检索</li>
+          <li>按 <code>(document_id, chunk_index)</code> 去重，保留最高分</li>
+          <li>按分数降序排序，截断到 <code>top_k</code></li>
+        </ol>
+        <div class="callout warn">
+          <span class="ct">分数统一为「越大越相关」</span>
+          <p>
+            使用 L2 距离的向量库会在返回前取负，所以这类知识库的分数是负数，
+            <code>score_threshold</code> 也要填负数。不同嵌入模型 / 不同度量的分数不可比。
+          </p>
+        </div>
+        <p>
+          <code>KnowledgeBase</code> 还提供文档级管理：
+          <code>insert_document</code>
+          <span class="src" data-src="src/agentscope/rag/_knowledge.py:286">_knowledge.py:286</span>、
+          <code>delete_document</code>、<code>list_documents</code>、<code>list_chunks</code>。
+        </p>
+
+        <h2 id="middleware">RAGMiddleware：static 与 agentic</h2>
+        <p>
+          <code>RAGMiddleware</code>
+          <span class="src" data-src="src/agentscope/middleware/_rag.py:626">_rag.py:626</span>
+          不拥有嵌入模型或向量库，它消费的是<strong>一组已经构造好的 <code>KnowledgeBase</code></strong>。
+          参数在嵌套的 <code>Parameters</code>
+          <span class="src" data-src="src/agentscope/middleware/_rag.py:648">_rag.py:648</span> 里：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>默认</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>mode</code><span class="src" data-src="src/agentscope/middleware/_rag.py:662">_rag.py:662</span></td>
+                <td><code>"agentic"</code></td>
+                <td><code>"static"</code> 或 <code>"agentic"</code></td>
+              </tr>
+              <tr>
+                <td><code>top_k</code><span class="src" data-src="src/agentscope/middleware/_rag.py:671">_rag.py:671</span></td>
+                <td><code>5</code></td>
+                <td>跨所有知识库与查询去重后截断</td>
+              </tr>
+              <tr>
+                <td><code>score_threshold</code><span class="src" data-src="src/agentscope/middleware/_rag.py:682">_rag.py:682</span></td>
+                <td><code>None</code></td>
+                <td>命中分数下限</td>
+              </tr>
+              <tr>
+                <td><code>rerank_candidate_k</code><span class="src" data-src="src/agentscope/middleware/_rag.py:691">_rag.py:691</span></td>
+                <td><code>2 × top_k</code></td>
+                <td>交给重排模型的候选数，上限 50</td>
+              </tr>
+              <tr>
+                <td><code>emit_hint_event</code><span class="src" data-src="src/agentscope/middleware/_rag.py:704">_rag.py:704</span></td>
+                <td><code>True</code></td>
+                <td>static 模式是否发 <code>HintBlockEvent</code></td>
+              </tr>
+              <tr>
+                <td><code>persist_hint</code><span class="src" data-src="src/agentscope/middleware/_rag.py:713">_rag.py:713</span></td>
+                <td><code>False</code></td>
+                <td>static 注入是否留在上下文；默认推理后移除</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>static：每轮自动检索</h3>
+        <p>
+          每次 reply 的首次推理前，把输入消息当查询去检索，结果包成 <code>HintBlock</code> 注入。
+          默认推理后移除，避免污染下一轮。
+        </p>
+        <pre><code>from agentscope.middleware import RAGMiddleware
+
+
+def build_static(kb):
+    mw = RAGMiddleware(
+        knowledge_bases=[kb],
+        parameters=RAGMiddleware.Parameters(
+            mode="static",
+            top_k=3,
+        ),
+    )
+    return mw</code></pre>
+        <h3>agentic：把检索做成工具</h3>
+        <p>
+          中间件暴露一个 <code>search_knowledge</code> 工具
+          <span class="src" data-src="src/agentscope/middleware/_rag.py:131">_rag.py:131</span>，
+          由模型自己决定何时检索、用什么 query。
+          <strong>工具不会自动进 Toolkit</strong>，必须手动注册：
+        </p>
+        <pre><code>from agentscope.tool import Toolkit
+
+
+async def build_agentic(kb):
+    mw = RAGMiddleware(
+        knowledge_bases=[kb],
+        parameters=RAGMiddleware.Parameters(mode="agentic", top_k=3),
+    )
+    toolkit = Toolkit(tools=await mw.list_tools())
+    return mw, toolkit</code></pre>
+        <p>
+          两种模式可以叠加：static 给首轮一个背景，agentic 让模型在需要时补检索。
+          叠加时仍然只需要把 agentic 那份的 <code>search_knowledge</code> 注册进 Toolkit。
+        </p>
+        <p>
+          工具的说明里会自动列出所有知识库的 <code>name</code> / <code>description</code>，
+          模型也可以通过 <code>knowledge_bases=[...]</code> 参数把搜索限定到子集。
+        </p>
+
+        <h2 id="rerank">重排：多一次模型调用</h2>
+        <p>
+          向量检索按嵌入相似度排序，但「语义最像」不等于「最有用」。给 <code>RAGMiddleware</code>
+          传 <code>rerank_model</code>（一个普通 <code>ChatModelBase</code>），它会先取
+          <code>rerank_candidate_k</code> 条候选，再让模型读完挑出最终 <code>top_k</code> 条。
+        </p>
+        <pre><code>mw = RAGMiddleware(
+    knowledge_bases=[kb],
+    rerank_model=rerank_chat_model,
+    parameters=RAGMiddleware.Parameters(
+        mode="agentic",
+        top_k=3,
+        rerank_candidate_k=10,
+    ),
+)</code></pre>
+        <ul>
+          <li><code>rerank_candidate_k</code> 必须不小于 <code>top_k</code>，默认 <code>2 × top_k</code>，上限 50</li>
+          <li>重排失败时记一条 warning，回退到向量检索顺序，不中断本次检索</li>
+          <li>重排模型读不了的模态会被排到最后或剔除</li>
+          <li>每个检索都多一次模型调用，延迟和成本都会上去</li>
+        </ul>
+
+        <h2 id="memory">长期记忆：三种中间件</h2>
+        <p>
+          长期记忆都实现为 <code>MiddlewareBase</code> 子类，挂到 <code>Agent(middlewares=[...])</code> 上。
+          它们都会在回复后写回、在回复前或模型主动调用时检索。
+        </p>
+        <h3>Agentic Memory：Markdown 文件</h3>
+        <p>
+          <code>AgenticMemoryMiddleware</code>
+          <span class="src" data-src="src/agentscope/middleware/_longterm_memory/_agentic_memory/_middleware.py:359">_middleware.py:359</span>
+          把记忆写成 <code>&lt;workdir&gt;/Memory/</code> 下的 Markdown 文件，并用一个简短的
+          <code>MEMORY.md</code> 做索引，自动注入系统提示
+          <span class="src" data-src="src/agentscope/middleware/_longterm_memory/_agentic_memory/_middleware.py:513">_middleware.py:513</span>。
+        </p>
+        <pre><code>from agentscope.middleware import AgenticMemoryMiddleware
+from agentscope.tool import Edit, Read, Toolkit, Write
+
+memory = AgenticMemoryMiddleware(workdir="/tmp/agentscope_memory")
+
+agent = Agent(
+    name="assistant",
+    system_prompt="You are a helpful assistant.",
+    model=model,
+    toolkit=Toolkit(tools=[Read(), Write(), Edit()]),
+    middlewares=[memory],
+)</code></pre>
+        <p>
+          它在 <code>on_reply</code> 里启动一个异步检索任务，在 <code>on_reasoning</code> 前检查是否完成；
+          完成就把选中的 Markdown 文件以 <code>HintBlock</code> 注入。写入靠智能体自己调用
+          <code>Read</code> / <code>Write</code> / <code>Edit</code>，所以这几个工具必须给它。
+        </p>
+        <h3>ReMe：进程内文件型记忆</h3>
+        <p>
+          <code>ReMeMiddleware</code>
+          <span class="src" data-src="src/agentscope/middleware/_longterm_memory/_reme/_middleware.py:88">_middleware.py:88</span>
+          由 ReMe 驱动，回复后通过 <code>auto_memory</code> 自动抽取并写回，智能体不需要手动保存。
+        </p>
+        <pre><code>from agentscope.middleware import ReMeMiddleware
+
+
+async def build_reme(chat_model, embedding_model):
+    memory = ReMeMiddleware(
+        workspace_dir=".reme",
+        parameters=ReMeMiddleware.Parameters(
+            chat_model=chat_model,
+            embedding_model=embedding_model,
+            mode="both",
+            top_k=5,
+        ),
+    )
+    toolkit = Toolkit(tools=await memory.list_tools())
+    return memory, toolkit</code></pre>
+        <p>
+          检索模式有三种：<code>static_control</code>（自动检索注入）、<code>agent_control</code>
+          （只暴露 <code>memory_search</code> 工具）、<code>both</code>（默认）。
+          无论哪种，对话写回都会自动执行。用完要 <code>await memory.close()</code>。
+        </p>
+        <h3>Mem0：开箱即用的记忆后端</h3>
+        <p>
+          <code>Mem0Middleware</code>
+          <span class="src" data-src="src/agentscope/middleware/_longterm_memory/_mem0/_middleware.py:86">_middleware.py:86</span>
+          由 mem0 驱动，支持开源版 <code>AsyncMemory</code> 与托管版 <code>AsyncMemoryClient</code>。
+        </p>
+        <pre><code>from agentscope.middleware import Mem0Middleware
+
+
+async def build_mem0(chat_model, embedding_model):
+    mw = Mem0Middleware(
+        user_id="alice",
+        chat_model=chat_model,
+        embedding_model=embedding_model,
+        mode="both",
+    )
+    toolkit = Toolkit(tools=await mw.list_tools())
+    return mw, toolkit</code></pre>
+        <p>
+          <code>agent_control</code> / <code>both</code> 模式下，<code>list_tools()</code> 会返回
+          <code>search_memory</code>
+          <span class="src" data-src="src/agentscope/middleware/_longterm_memory/_mem0/_tools.py:61">_tools.py:61</span>
+          和
+          <code>add_memory</code>
+          <span class="src" data-src="src/agentscope/middleware/_longterm_memory/_mem0/_tools.py:151">_tools.py:151</span>
+          两个工具。和 RAG 一样，<strong>不会自动进 Toolkit</strong>。
+        </p>
+
+        <h2 id="memory-compare">Agentic / ReMe / Mem0 怎么选</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>维度</th>
+                <th>Agentic Memory</th>
+                <th>ReMe</th>
+                <th>Mem0</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>存储</td>
+                <td>Markdown 文件 + MEMORY.md 索引</td>
+                <td>ReMe 工作区（文件 + 索引）</td>
+                <td>mem0 后端（默认 Qdrant）</td>
+              </tr>
+              <tr>
+                <td>写入</td>
+                <td>智能体自己用 Write / Edit</td>
+                <td>回复后 auto_memory 自动抽取</td>
+                <td>回复后自动写回，或 <code>add_memory</code> 工具</td>
+              </tr>
+              <tr>
+                <td>检索</td>
+                <td>LLM 选文件 + MEMORY.md 索引</td>
+                <td>BM25 或向量，三种模式</td>
+                <td>向量检索，<code>search_memory</code> 工具</td>
+              </tr>
+              <tr>
+                <td>隔离键</td>
+                <td><code>workdir</code></td>
+                <td><code>session_id</code> 写入 / <code>workspace_dir</code> 检索</td>
+                <td><code>user_id</code>，可选 <code>agent_id</code></td>
+              </tr>
+              <tr>
+                <td>额外依赖</td>
+                <td>无（内置）</td>
+                <td><code>agentscope[reme]</code></td>
+                <td><code>agentscope[mem0]</code></td>
+              </tr>
+              <tr>
+                <td>适合</td>
+                <td>想完全掌控、可读可改的记忆</td>
+                <td>文件型、自动抽取</td>
+                <td>开箱即用、按用户隔离</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="compare">RAG vs 长期记忆 vs 上下文压缩</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>机制</th>
+                <th>数据来源</th>
+                <th>生命周期</th>
+                <th>解决什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>上下文压缩（06）</td>
+                <td>当前会话的历史</td>
+                <td>一次会话内</td>
+                <td>窗口装不下</td>
+              </tr>
+              <tr>
+                <td>RAG（本章）</td>
+                <td>外部文档</td>
+                <td>长期，需重新索引</td>
+                <td>模型不知道你的私有知识</td>
+              </tr>
+              <tr>
+                <td>长期记忆（本章）</td>
+                <td>对话中沉淀的事实</td>
+                <td>跨会话</td>
+                <td>用户偏好、历史决策</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          三者可以同时用：压缩管窗口，RAG 管知识，长期记忆管人。
+          它们都通过中间件 / 配置接入，不需要改 Agent 源码。
+        </p>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>解析文件</td><td><code>await TextParser().parse(file=..., filename=...)</code></td></tr>
+              <tr><td>切块</td><td><code>await ApproxTokenChunker().chunk(sections)</code></td></tr>
+              <tr><td>入库</td><td><code>await kb.insert_document(chunks)</code></td></tr>
+              <tr><td>检索</td><td><code>await kb.search(queries, top_k=3)</code></td></tr>
+              <tr><td>接 RAG（自动）</td><td><code>RAGMiddleware(..., Parameters(mode="static"))</code></td></tr>
+              <tr><td>接 RAG（工具）</td><td><code>mode="agentic"</code> + <code>Toolkit(tools=await mw.list_tools())</code></td></tr>
+              <tr><td>重排</td><td><code>rerank_model=chat_model, rerank_candidate_k=10</code></td></tr>
+              <tr><td>文件型记忆</td><td><code>AgenticMemoryMiddleware(workdir=...)</code></td></tr>
+              <tr><td>自动抽取记忆</td><td><code>ReMeMiddleware(...)</code> / <code>Mem0Middleware(...)</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">KnowledgeBase 建好了但检索报错</span>
+          <p>
+            先看 <code>vector_store</code> 是否在 <code>async with</code> 里。KnowledgeBase 不会替你打开连接；
+            没进入上下文就操作 collection，会直接失败。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">维度对不上</span>
+          <p>
+            collection 的维度由 <code>embedding_model.dimensions</code> 决定。换嵌入模型后必须重建 collection，
+            否则写入或检索会报维度不匹配。索引与检索也必须是同一个模型。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">agentic 模式检索工具没生效</span>
+          <p>
+            <code>RAGMiddleware.list_tools()</code> 返回的 <code>search_knowledge</code> 不会自动注册。
+            必须 <code>Toolkit(tools=await mw.list_tools())</code>，否则模型根本看不到这个工具。
+            长期记忆的 <code>search_memory</code> / <code>add_memory</code> 也一样。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">把 static 注入当成永久上下文</span>
+          <p>
+            <code>persist_hint=False</code> 是默认值：检索结果在推理后会被移出上下文。
+            如果你希望它留在后续轮次，显式设 <code>persist_hint=True</code>，并接受它占用 token。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">重排候选数小于 top_k</span>
+          <p>
+            <code>rerank_candidate_k</code> 必须不小于 <code>top_k</code>，否则重排只能在不足的结果里换顺序，
+            等于没起作用。默认取 <code>2 × top_k</code> 是个合理起点。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">知识库描述要写「什么时候该查」</span>
+          <p>
+            <code>KnowledgeBase.description</code> 会出现在 <code>search_knowledge</code> 的工具说明里。
+            写「产品文档，包含 API 与计费规则；问价格或接口时查它」比写「文档库」有用得多。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">ReMe 用完要 close</span>
+          <p>
+            <code>ReMeMiddleware</code> 会启动后台任务与索引。应用退出前
+            <code>await memory.close()</code>，否则进程可能挂住。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li>索引和检索用了不同的嵌入模型，会发生什么？为什么？</li>
+          <li><code>mode="static"</code> 和 <code>mode="agentic"</code> 分别在什么时候检索？工具要不要手动注册？</li>
+          <li>RAG、长期记忆、上下文压缩分别解决什么问题？能同时开吗？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>用 <code>TextParser</code> + <code>ApproxTokenChunker</code> 把一段 Markdown 切块，打印每个 chunk 的 <code>chunk_index</code> / <code>total_chunks</code>。</li>
+          <li>用 <code>QdrantStore(location=":memory:")</code> 建一个知识库，写入两段文本，检索并观察 <code>score</code>。</li>
+          <li>分别用 static 和 agentic 模式接入同一个知识库，比较事件流里有没有 <code>search_knowledge</code> 调用。</li>
+          <li>用 <code>AgenticMemoryMiddleware</code> 让 Agent 记住一个偏好，再新建 Agent 复用同一个 <code>workdir</code>，看它是否记得。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          RAG 和记忆让 Agent「有知识」。下一章 <strong>12 工作区与沙箱</strong> 让它「有手脚」：
+          读写文件、执行命令、在 Docker / K8s 里安全运行。
+          12 章尚未发布前，可以先回 <a href="06-context.html">06 上下文管理</a> 复习
+          <code>Offloader</code> 与工作区的关系。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

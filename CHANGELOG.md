@@ -2,6 +2,19 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.11.0 — 2026-11-06
+
+新增第 11 章「RAG 与长期记忆」，把「知识」和「记忆」拆成两条独立链路。
+
+- **五模块**：Parser → Section、Chunker → Chunk、Embedding、VectorStore、KnowledgeBase。
+- **索引**：解析 → 切分 → 入库，同一文档共享 `document_id`，collection 懒创建。
+- **检索**：批量嵌入、并发检索、按 `(document_id, chunk_index)` 去重、分数降序截断。
+- **嵌入**：`dimensions` 决定 collection 维度，`supports_multimodal` 决定 DataBlock 是否被丢弃。
+- **RAGMiddleware**：`static` 首轮注入、`agentic` 暴露 `search_knowledge`，工具需手动注册。
+- **重排**：`rerank_model` + `rerank_candidate_k`，失败回退向量顺序。
+- **长期记忆**：Agentic Memory（Markdown）、ReMe（自动抽取）、Mem0（开箱即用）的存储与模式对照。
+- **对比**：RAG / 长期记忆 / 上下文压缩三者的数据来源与生命周期。
+
 ## v0.10.0 — 2026-11-06
 
 新增第 10 章「计划模式与 SOP」，区分「模型自己管步骤」和「开发者固定步骤」。
