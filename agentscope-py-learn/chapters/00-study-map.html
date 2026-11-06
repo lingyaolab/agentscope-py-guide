@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 学习站的使用说明：三条学习主线、章节依赖图、前置知识自查、没有 API Key 能学到哪一步，以及怎么和 AgentScope Java 教程对照阅读。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="00 学习地图：怎么用本站 + 前置知识 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="三条学习主线、章节依赖图、前置知识自查、没有 API Key 能学到哪一步。" />
+    <title>00 学习地图：怎么用本站 + 前置知识 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="00-study-map" data-root="..">
+    <main>
+      <article class="article">
+        <h1>00 · 学习地图</h1>
+        <p class="lede">
+          这一章不写代码，只解决三个问题：<strong>官方文档已经很全，为什么还要看这里</strong>、<strong>这个站该怎么读</strong>、
+          <strong>你现在缺的是哪块前置知识</strong>。读完再决定从第几章开始。
+        </p>
+
+        <h2 id="why-site">为什么要再造一个文档站</h2>
+        <p>
+          官方文档（<a href="https://docs.agentscope.io/zh/versions/2.0.11/index" rel="noreferrer">docs.agentscope.io</a>）
+          质量很好，而且有完整中文版。但它是一份 <strong>reference</strong>：按模块分篇，假设你知道自己要找什么。
+          初学者打开它，最常见的状态是「每一页都看得懂，但不知道先看哪一页」。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>官方文档的立场</th>
+                <th>初学者遇到的后果</th>
+                <th>本站怎么处理</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>按模块组织：agent / model / tool / workspace 各一篇</td>
+                <td>看完 agent 篇还不知道它们怎么组合成一个能上线的服务</td>
+                <td>按落地顺序重排：先能跑 → 再懂一次 ReAct → 最后碰扩展点</td>
+              </tr>
+              <tr>
+                <td>默认你熟悉 Python 异步编程</td>
+                <td>不知道为什么每个方法都是 <code>async</code>，也不知道流式为什么要 <code>async for</code></td>
+                <td>把 <code>asyncio</code> 与事件流当主线讲，而不是当背景知识</td>
+              </tr>
+              <tr>
+                <td>示例是片段，不承诺可运行</td>
+                <td>复制下来缺 import、缺依赖、缺 key，报错信息也对不上</td>
+                <td>每章给完整文件结构与可运行脚本，代码块标注文件路径</td>
+              </tr>
+              <tr>
+                <td>版本更新快，博客滞后</td>
+                <td>搜到的例子是 1.x 写法，2.0 已经重写或改名</td>
+                <td>每页对应 2.0.11，附录 D 集中列 1.x → 2.0 的迁移表</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout tip">
+          <span class="ct">本站不做什么</span>
+          <p>
+            不重复 API 参考、不逐条翻译配置项、不解释 A2A / MCP 协议规范本身。这些官方文档做得比一本教程更好，而且更新更及时。
+            本站只补四件事：<strong>顺序</strong>、<strong>可运行</strong>、<strong>选型</strong>、<strong>踩坑</strong>。
+          </p>
+        </div>
+
+        <h2 id="three-lines">三条学习主线：同一章读三遍</h2>
+        <p>每一章都切成三种可读法。不必一次全读，但<strong>别只读第一种</strong>——只照抄不改，一周后还是不会。</p>
+        <div class="compare">
+          <div class="col pick">
+            <h4>① 跟做线</h4>
+            <ul>
+              <li>「读完你能做到」+「最小可跑」+「逐行解读」</li>
+              <li>目标：10 分钟内看到程序真的输出东西</li>
+            </ul>
+          </div>
+          <div class="col">
+            <h4>② 理解线</h4>
+            <ul>
+              <li>「端到端」+「速查表」</li>
+              <li>目标：知道一条用户消息在哪个环节变成模型输入，又在哪个环节变成工具调用</li>
+            </ul>
+          </div>
+          <div class="col">
+            <h4>③ 避坑线</h4>
+            <ul>
+              <li>「陷阱与窍门」+「自检三问」+「动手练习」</li>
+              <li>目标：出错时能自己定位到具体模块、配置或代码行</li>
+            </ul>
+          </div>
+        </div>
+        <p>
+          实际建议：第一遍只走 ①，把代码跑起来；第二天通勤路上读 ②；等你真的撞到错误，再回来读 ③。
+          这时候的阅读吸收率最高，因为你带着问题来。
+        </p>
+
+        <h2 id="deps">章节依赖图：为什么是这个顺序</h2>
+        <p>
+          三条主线不是并列的，有明确的先后。下面这张图只画「不读前一章会卡住」的依赖，虚线表示可以跳。
+        </p>
+        <div class="stack">
+          <div class="layer accent">
+            <span class="lt">00 学习地图 → 01 环境与依赖 → 02 第一个 Agent</span>
+            <div class="ld">
+              必须按顺序。01 解决「装不上 / 跑不起来」，02 解决「跑起来了但不知道一次 ReAct 发生了什么」。
+            </div>
+          </div>
+          <div class="layer in2">
+            <span class="lt">03 消息与事件 · 04 模型 · 05 工具 · 06 上下文 · 07 中间件 · 08 权限</span>
+            <div class="ld">
+              这六章是「单个 Agent 的能力边界」。03 决定你怎么观察它，04 决定它用哪个大脑，05 决定它能做什么，
+              06 决定它能记多久，07 决定你怎么插手，08 决定它什么时候必须停下来问人。
+            </div>
+          </div>
+          <div class="layer in3">
+            <span class="lt">09 流水线 · 10 计划模式与 SOP · 11 RAG 与长期记忆</span>
+            <div class="ld">
+              从这里开始进入「多智能体与知识」。09 讲固定编排，10 讲任务拆解与验收，11 讲外部知识与跨会话记忆。
+              11 依赖 05（工具）与 06（上下文）。
+            </div>
+          </div>
+          <div class="layer">
+            <span class="lt">12 工作区 · 13 中断恢复 · 14 Console</span>
+            <div class="ld">
+              让 Agent 真的能读写文件、执行命令、在长任务里停下来再继续；14 是调试手段，可以提前读。
+            </div>
+          </div>
+          <div class="layer">
+            <span class="lt">15–20 Agent Service、会话 SSE、Team、渠道、Hub、多租户</span>
+            <div class="ld">
+              这一段讲「怎么把 Agent 变成服务」。15 是总入口，16 是前后端契约，17–20 是服务之上的团队、渠道与资源共享。
+              15 依赖 02、05、08。
+            </div>
+          </div>
+          <div class="layer">
+            <span class="lt">21–26 可观测性 · 评测 · 生产化 · A2A · 实时语音 · 综合案例</span>
+            <div class="ld">
+              21、23 可以随时插读；22 回答「改了 prompt / 模型 / 工具之后到底变好没有」；
+              24、25 是扩展方向；26 是工程收口，要求前面至少读完 02、05、11、15。
+            </div>
+          </div>
+        </div>
+        <div class="callout">
+          <span class="ct">为什么把「环境与依赖」单独一整章</span>
+          <p>
+            AgentScope 最容易失败的地方不是 API 用错，而是<strong>Python 版本与可选依赖没对上</strong>：
+            核心包要求 Python 3.11+，而服务、RAG、向量库、沙箱各自是独立的 extra。
+            这一章把「装错」的每一种表现都列出来，比后面任何一章都省时间。
+          </p>
+        </div>
+
+        <h2 id="python-pre">前置知识自查：这些不会会卡在哪</h2>
+        <p>不需要精通，但下面每一条都会在具体章节里用到。括号里是「不会时会卡住的第一处」。</p>
+        <ul class="goals">
+          <li>
+            <strong>Python 3.11+ 基础</strong>：类型标注、<code>dataclass</code> / Pydantic 模型、
+            <code>match</code> 语句（卡在 01 章：看不懂 <code>Agent</code> 的参数与返回结构）
+          </li>
+          <li>
+            <strong>asyncio</strong>：<code>async def</code>、<code>await</code>、<code>asyncio.run</code>、
+            <code>async for</code>（卡在 01 章：不知道为什么脚本必须包一层 <code>async def main()</code>）
+          </li>
+          <li>
+            <strong>虚拟环境与包管理</strong>：<code>uv</code> 或 <code>pip</code>、<code>pyproject.toml</code>、
+            extra（卡在 01 章：不知道该装 <code>agentscope</code> 还是 <code>agentscope[full]</code>）
+          </li>
+          <li>
+            <strong>HTTP 与 JSON</strong>：请求头、状态码、流式响应（卡在 01 章：不知道 401 和 404 分别是谁返回的）
+          </li>
+          <li>
+            <strong>环境变量</strong>：<code>os.getenv</code> / <code>os.environ</code>、不把 key 写进代码
+            （卡在 01 章：模型客户端初始化时直接报错）
+          </li>
+        </ul>
+        <div class="callout warn">
+          <span class="ct">如果你完全没写过异步 Python</span>
+          <p>
+            先花 30 分钟读一遍 Python 官方文档的
+            <a href="https://docs.python.org/zh-cn/3/library/asyncio-task.html" rel="noreferrer">协程与任务</a>，
+            只需要理解 <code>async def</code>、<code>await</code> 和「事件循环负责调度」这三件事。
+            本站不会重复讲语法，但会在 01 章把「为什么必须 <code>await</code>」讲透。
+          </p>
+        </div>
+
+        <h2 id="apikey">没有 API Key，能学到哪一步</h2>
+        <p>
+          DeepSeek 需要一个有效的 key，但本站大部分内容是「读 + 跑通结构 + 用假模型」，不调用真实模型也能完成。按章节看：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>没有 Key 能做什么</th>
+                <th>需要 Key 才能看到的现象</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>00–01 章</td>
+                <td>建虚拟环境、装包、写配置、导入模块、用假模型跑通 ReAct 结构</td>
+                <td>第一次真实请求的回答质量、流式首字延迟、token 用量</td>
+              </tr>
+              <tr>
+                <td>02–08 章</td>
+                <td>读懂 Agent、消息、工具、中间件、权限的代码结构与调用链</td>
+                <td>工具是否被正确调用、上下文压缩是否触发、权限拦截是否生效</td>
+              </tr>
+              <tr>
+                <td>09 章之后</td>
+                <td>多智能体、RAG、服务、渠道的工程结构与配置</td>
+                <td>检索质量、团队协作效果、SSE 实际事件顺序</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout tip">
+          <span class="ct">想完全零成本跑通</span>
+          <p>
+            可以换成本地 Ollama（<code>agentscope[model-ollama]</code> + <code>OllamaChatModel</code>）。
+            本站默认用 DeepSeek，是因为它便宜、国内直连、并且兼容 OpenAI 协议；换成 Ollama 只需要改两行，
+            01 章会给出对照。
+          </p>
+        </div>
+
+        <h2 id="java-compare">和现有 Java 教程怎么配合</h2>
+        <p>
+          本站和 <code>agentscope-guide</code>（AgentScope Java 2.0.4）刻意保持<strong>同一套概念、不同的实现</strong>。
+          同一个问题，你可以在两站之间来回对照：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>概念</th>
+                <th>AgentScope Java 2.0.4</th>
+                <th>AgentScope Python 2.0.11</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>智能体</td>
+                <td><code>ReActAgent</code> / <code>HarnessAgent</code></td>
+                <td><code>Agent</code>（无状态推理-行动引擎）</td>
+              </tr>
+              <tr>
+                <td>消息</td>
+                <td><code>Msg</code> + <code>ToolUseBlock</code></td>
+                <td><code>Msg</code> + <code>ToolCallBlock</code></td>
+              </tr>
+              <tr>
+                <td>工具注册</td>
+                <td><code>Toolkit</code></td>
+                <td><code>Toolkit</code> / <code>ToolGroup</code></td>
+              </tr>
+              <tr>
+                <td>运行形态</td>
+                <td>Reactor <code>Mono</code> / <code>Flux</code></td>
+                <td><code>async</code> / <code>async for</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          完整对照表在附录 F。建议的用法：<strong>先在本站把 Python 侧跑通，再回 Java 站看同一个模块的工程化实现</strong>；
+          或者反过来，用你熟悉的 Java 概念给 Python 侧定位。
+        </p>
+
+        <h2 id="how-read">每一章的固定结构与图例</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>小节</th>
+                <th>你会看到什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>读完你能做到</td>
+                <td>三条可验证的能力，做不到说明这一章还没读透</td>
+              </tr>
+              <tr>
+                <td>先说为什么</td>
+                <td>这个 API / 分层为什么存在，不用它会怎样</td>
+              </tr>
+              <tr>
+                <td>最小可跑</td>
+                <td>完整文件，含依赖与配置，复制即可运行</td>
+              </tr>
+              <tr>
+                <td>逐行解读</td>
+                <td>只讲容易懵的行，不逐字翻译代码</td>
+              </tr>
+              <tr>
+                <td>端到端</td>
+                <td>一次调用从消息到模型再到工具结果的完整链路</td>
+              </tr>
+              <tr>
+                <td>速查表</td>
+                <td>这一章涉及的 API、配置项与默认值</td>
+              </tr>
+              <tr>
+                <td>陷阱与窍门</td>
+                <td>「你会看到 X → 因为 Y → 改成 Z」</td>
+              </tr>
+              <tr>
+                <td>自检三问 / 动手练习</td>
+                <td>确认你真的理解了，而不是抄对了</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="src-line">
+          图例：<span class="src">文件名:行号</span> 这种胶囊是源码出处，单击复制路径、Ctrl/Cmd + 点击在 GitHub
+          打开；<span class="tag">下一轮</span> 表示章节已规划但尚未开写。
+        </p>
+
+        <h2 id="source-truth">事实来源：我怎么保证不编</h2>
+        <p>
+          本站只认 <strong>AgentScope Python 2.0.11</strong> 这一份源码（tag <code>v2.0.11</code>）。
+          每个「默认值是 50」「base URL 是 https://api.deepseek.com」「这里会抛 RuntimeError」都带
+          <code>file:line</code>，并在发布前用脚本核对：
+        </p>
+        <ul>
+          <li><code>node tools/check-sources.cjs</code>：每条出处的文件是否存在、行号是否越界、大小写是否与磁盘一致</li>
+          <li><code>node tools/check-site.cjs</code>：站内链接、锚点、导航与实际小节标题是否一致</li>
+        </ul>
+        <p>
+          如果官方文档与源码冲突，以源码为准，并在正文里同时给出两边出处——这类差异会集中在附录 D。
+        </p>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          直接进 <a href="01-setup.html">01 环境与依赖</a>。如果你已经装好 <code>agentscope==2.0.11</code>、
+          只是想看第一个 Agent 怎么写，可以等 02 章发布，但遇到装包或导入失败时还是要回来读 01。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

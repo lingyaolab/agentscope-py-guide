@@ -1,0 +1,515 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 环境与依赖：Python 3.11+、uv/pip 安装、optional extras、DeepSeek 凭证、最小 Agent 示例与一次 ReAct 的完整链路。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="01 环境与依赖：Python 3.11+ 跑通第一个 Agent · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="Python 3.11+、uv/pip、optional extras、DeepSeek 凭证、最小 Agent 与一次 ReAct 的完整链路。" />
+    <title>01 环境与依赖：Python 3.11+ 跑通第一个 Agent · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="01-setup" data-root="..">
+    <main>
+      <article class="article">
+        <h1>01 · 环境与依赖</h1>
+        <p class="lede">
+          这一章只做一件事：让你在 25 分钟内看到一个由 <strong>AgentScope 2.0.11</strong> 驱动的 Agent 真的回话。
+          同时把「装了什么、为什么装、装错会怎样」讲清楚，后面所有章节都建立在这套环境上。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>用 <code>uv</code> 或 <code>pip</code> 建一个 Python 3.11+ 虚拟环境，并装上 <code>agentscope==2.0.11</code></li>
+          <li>用 <code>DeepSeekCredential</code> + <code>DeepSeekChatModel</code> 组装一个最小 Agent，跑通一次 <code>reply()</code></li>
+          <li>说清 <code>Agent</code>、<code>ChatModel</code>、<code>Toolkit</code>、<code>Msg</code> 各自负责什么，以及一次 ReAct 的循环边界</li>
+        </ul>
+
+        <h2 id="why">先说为什么：Agent 不是「一个会说话的模型」</h2>
+        <p>
+          一个只会 <code>chat.completions.create()</code> 的脚本，输入一段文本、输出一段文本，仅此而已。
+          Agent 多出来的是<strong>循环</strong>：模型可以决定「先调用一个工具」，拿到结果后继续推理，直到它认为可以给出最终回答。
+          这个「推理 → 行动 → 再推理」的循环，就是 ReAct。
+        </p>
+        <div class="stack">
+          <div class="layer accent">
+            <span class="lt">模型（ChatModel）</span>
+            <div class="ld">只负责一次「给定上下文，产出下一段内容或工具调用请求」。它不执行工具，也不记得上一轮。</div>
+          </div>
+          <div class="layer in2">
+            <span class="lt">工具（Toolkit）</span>
+            <div class="ld">把 Python 函数、MCP 服务、技能注册成模型能看懂的 schema；真正执行的是你的代码。</div>
+          </div>
+          <div class="layer in3">
+            <span class="lt">智能体（Agent）</span>
+            <div class="ld">持有系统提示、工具集与状态，驱动 ReAct 循环、检查权限、处理中断，最后产出一条 <code>Msg</code>。</div>
+          </div>
+        </div>
+        <p>
+          AgentScope 2.0 的 <code>Agent</code> 被设计成<strong>无状态的推理-行动引擎</strong>：对话历史放在
+          <code>AgentState</code> 里，Agent 本身只负责「这一轮怎么走」。默认情况下它会自己创建一份状态
+          <span class="src" data-src="src/agentscope/agent/_agent.py:175">_agent.py:175</span>，
+          所以最小示例不需要你手动管理。
+        </p>
+
+        <h2 id="minimal">最小可跑：一个 Agent 回答第一个问题</h2>
+        <p>目录结构只有两个文件，先建出来：</p>
+        <pre><code>first-agent/
+├── pyproject.toml
+└── main.py</code></pre>
+
+        <h3>1. 建环境并装包</h3>
+        <pre><code># 建议用 uv；没有的话先装：pip install uv
+uv venv --python 3.11
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
+
+uv pip install "agentscope==2.0.11"</code></pre>
+        <p>
+          核心包要求 Python <strong>3.11 及以上</strong>
+          <span class="src" data-src="pyproject.toml:20">pyproject.toml:20</span>。
+          装完验证版本：
+        </p>
+        <pre><code>python -c "import agentscope; print(agentscope.__version__)"</code></pre>
+        <p>
+          应该输出 <code>2.0.11</code>
+          <span class="src" data-src="src/agentscope/_version.py:4">_version.py:4</span>。
+        </p>
+
+        <h3>2. 设置 API Key</h3>
+        <pre><code># PowerShell
+$env:DEEPSEEK_API_KEY = "sk-..."
+
+# macOS / Linux
+export DEEPSEEK_API_KEY="sk-..."</code></pre>
+        <div class="callout warn">
+          <span class="ct">不要把 key 写进代码或提交到仓库</span>
+          <p>
+            示例统一用 <code>os.environ[...]</code> 读取。仓库里可以放 <code>.env.example</code>，
+            但不要把真实的 <code>.env</code> 提交上去。
+          </p>
+        </div>
+
+        <h3>3. main.py</h3>
+        <pre><code>import asyncio
+import os
+
+from agentscope.agent import Agent
+from agentscope.credential import DeepSeekCredential
+from agentscope.message import UserMsg
+from agentscope.model import DeepSeekChatModel
+from agentscope.tool import Toolkit
+
+
+async def main() -&gt; None:
+    agent = Agent(
+        name="Friday",
+        system_prompt="You are a helpful assistant named Friday.",
+        model=DeepSeekChatModel(
+            credential=DeepSeekCredential(
+                api_key=os.environ["DEEPSEEK_API_KEY"],
+            ),
+            model="deepseek-chat",
+        ),
+        toolkit=Toolkit(),
+    )
+
+    msg = await agent.reply(
+        UserMsg(name="user", content="用三句话解释什么是 ReAct。"),
+    )
+
+    for block in msg.content:
+        if block.type == "text":
+            print(block.text)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())</code></pre>
+        <p>运行：</p>
+        <pre><code>python main.py</code></pre>
+        <p>
+          如果看到一段中文回答，环境就通了。注意 <code>Toolkit()</code> 是空的：这一轮不会发生工具调用，
+          但仍然走完整的 ReAct 循环，只是第一次模型调用就直接给出了最终回答。
+        </p>
+
+        <h2 id="line-by-line">逐行解读：容易懵的地方</h2>
+        <h3>Agent 的构造参数</h3>
+        <p>
+          <code>Agent</code> 的构造函数
+          <span class="src" data-src="src/agentscope/agent/_agent.py:121">_agent.py:121</span>
+          只有 <code>name</code>、<code>system_prompt</code>、<code>model</code> 是必填，其余都有默认值。
+          最常改的是这四个：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>参数</th>
+                <th>作用</th>
+                <th>不传时</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>toolkit</code></td>
+                <td>工具、MCP、技能的唯一起点</td>
+                <td>内部创建一个空 <code>Toolkit()</code><span class="src" data-src="src/agentscope/agent/_agent.py:202">_agent.py:202</span></td>
+              </tr>
+              <tr>
+                <td><code>state</code></td>
+                <td>对话历史与运行状态</td>
+                <td>新建一份 <code>AgentState()</code><span class="src" data-src="src/agentscope/agent/_agent.py:175">_agent.py:175</span></td>
+              </tr>
+              <tr>
+                <td><code>middlewares</code></td>
+                <td>在 reply / 推理 / 工具等钩子上扩展行为</td>
+                <td>空列表</td>
+              </tr>
+              <tr>
+                <td><code>react_config</code></td>
+                <td>循环上限、结构化输出宽限、拒绝后是否停止</td>
+                <td><code>ReActConfig()</code>，最多 50 轮<span class="src" data-src="src/agentscope/agent/_config.py:367">_config.py:367</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>模型的两个默认值</h3>
+        <p>
+          <code>DeepSeekChatModel</code> 的构造函数
+          <span class="src" data-src="src/agentscope/model/_deepseek/_model.py:79">_model.py:79</span>
+          里有两个容易忽略的默认：
+        </p>
+        <ul>
+          <li><code>stream=True</code><span class="src" data-src="src/agentscope/model/_deepseek/_model.py:84">_model.py:84</span>：底层默认走流式；<code>reply()</code> 会在内部把流式结果聚合成完整消息。</li>
+          <li><code>max_retries=3</code>、<code>retry_delay=1.0</code><span class="src" data-src="src/agentscope/model/_deepseek/_model.py:85">_model.py:85</span>：网络抖动时自动重试，不是你业务层的重试。</li>
+          <li><code>context_size=65536</code><span class="src" data-src="src/agentscope/model/_deepseek/_model.py:87">_model.py:87</span>：用于上下文压缩的预算基准，不是模型的硬上限。</li>
+        </ul>
+
+        <h3>消息为什么是「内容块列表」</h3>
+        <p>
+          <code>Msg.content</code> 的类型是 <code>list[ContentBlock]</code>
+          <span class="src" data-src="src/agentscope/message/_base.py:80">_base.py:80</span>，
+          而不是一个字符串。因为一条消息里可能同时有文本、思考、工具调用、工具结果、图片或音频。
+          <code>UserMsg(...)</code> 是便捷构造器
+          <span class="src" data-src="src/agentscope/message/_base.py:569">_base.py:569</span>，
+          传字符串时会自动包成 <code>TextBlock</code>。
+        </p>
+
+        <h3>reply 与 reply_stream 的区别</h3>
+        <p>
+          <code>reply()</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:333">_agent.py:333</span>
+          把事件流消费完，只返回最后一条 <code>Msg</code>；
+          <code>reply_stream()</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:289">_agent.py:289</span>
+          则把中间事件逐个交给你，适合做打字机效果和工具调用可视化。
+        </p>
+        <pre><code>from agentscope.event import EventType
+
+async for event in agent.reply_stream(user_msg):
+    if event.type == EventType.TEXT_BLOCK_DELTA:
+        print(event.delta, end="", flush=True)
+    elif event.type == EventType.TOOL_CALL_START:
+        print(f"\n[calling tool] {event.tool_name}")</code></pre>
+        <p>
+          事件类型的完整列表在
+          <span class="src" data-src="src/agentscope/event/_event.py:25">_event.py:25</span>，
+          文本增量是 <code>TEXT_BLOCK_DELTA</code>
+          <span class="src" data-src="src/agentscope/event/_event.py:35">_event.py:35</span>，
+          工具调用开始是 <code>TOOL_CALL_START</code>
+          <span class="src" data-src="src/agentscope/event/_event.py:48">_event.py:48</span>。
+        </p>
+
+        <h2 id="end-to-end">端到端：一条消息怎么走完一次 ReAct</h2>
+        <p>把 <code>await agent.reply(...)</code> 拆开，大概是这样一条时间线：</p>
+        <div class="stack">
+          <div class="layer accent">
+            <span class="lt">1. 组装输入</span>
+            <div class="ld">
+              把你的 <code>UserMsg</code> 追加进状态，连同系统提示、历史消息、工具 schema 一起准备成模型输入。
+            </div>
+          </div>
+          <div class="layer in2">
+            <span class="lt">2. 调用模型（reasoning）</span>
+            <div class="ld">
+              <code>_call_model</code>
+              <span class="src" data-src="src/agentscope/agent/_agent.py:3291">_agent.py:3291</span>
+              把输入发给 <code>DeepSeekChatModel</code>，流式拿回文本增量或工具调用。
+            </div>
+          </div>
+          <div class="layer in3">
+            <span class="lt">3. 有工具调用就执行（acting）</span>
+            <div class="ld">
+              <code>_acting_impl</code>
+              <span class="src" data-src="src/agentscope/agent/_agent.py:2785">_agent.py:2785</span>
+              先过权限检查，再执行工具，把结果写成 <code>ToolResultBlock</code> 追加回上下文。
+            </div>
+          </div>
+          <div class="layer">
+            <span class="lt">4. 回到第 2 步，直到没有工具调用</span>
+            <div class="ld">
+              循环由 <code>_reply_impl</code>
+              <span class="src" data-src="src/agentscope/agent/_agent.py:1036">_agent.py:1036</span>
+              控制；超过 <code>max_iters=50</code> 会以 <code>EXCEED_MAX_ITERS</code> 结束。
+            </div>
+          </div>
+          <div class="layer">
+            <span class="lt">5. 产出最终消息</span>
+            <div class="ld">
+              <code>reply</code> 从事件流里取出最后一条 <code>Msg</code> 返回。
+            </div>
+          </div>
+        </div>
+        <div class="callout">
+          <span class="ct">为什么「空 Toolkit」也能跑</span>
+          <p>
+            模型的输出可以是「直接回答」，也可以是「请求调用工具」。当工具集为空时，模型没有可调用的工具，
+            通常会直接回答。所以最小示例不需要任何工具，但循环本身是完整存在的。
+          </p>
+        </div>
+
+        <h2 id="versions">版本对齐：2.0.11 到底要什么</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>项</th>
+                <th>要求</th>
+                <th>出处</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Python</td>
+                <td>3.11 及以上</td>
+                <td><span class="src" data-src="pyproject.toml:20">pyproject.toml:20</span></td>
+              </tr>
+              <tr>
+                <td>AgentScope</td>
+                <td>2.0.11（本站全部内容对应此版本）</td>
+                <td><span class="src" data-src="src/agentscope/_version.py:4">_version.py:4</span></td>
+              </tr>
+              <tr>
+                <td>许可</td>
+                <td>Apache-2.0</td>
+                <td><span class="src" data-src="pyproject.toml:9">pyproject.toml:9</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>可选依赖怎么选</h3>
+        <p>
+          核心包只包含 SDK 必需项；服务、RAG、向量库、沙箱、渠道等都是独立的 extra
+          <span class="src" data-src="pyproject.toml:54">pyproject.toml:54</span>。
+          常见组合：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你要做什么</th>
+                <th>安装</th>
+                <th>主要 extra</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>只写 SDK、跑单 Agent</td>
+                <td><code>agentscope==2.0.11</code></td>
+                <td>无</td>
+              </tr>
+              <tr>
+                <td>本地调试 + 内置工具 + TUI</td>
+                <td><code>agentscope[tools,tui]==2.0.11</code></td>
+                <td><code>tools</code>、<code>tui</code></td>
+              </tr>
+              <tr>
+                <td>部署 Agent Service</td>
+                <td><code>agentscope[service]==2.0.11</code></td>
+                <td><code>service</code>（FastAPI / uvicorn / AG-UI）</td>
+              </tr>
+              <tr>
+                <td>RAG + 向量库</td>
+                <td><code>agentscope[rag,vdb-qdrant]==2.0.11</code></td>
+                <td><code>rag</code>、<code>vdb-*</code></td>
+              </tr>
+              <tr>
+                <td>沙箱工作区</td>
+                <td><code>agentscope[workspace-docker]==2.0.11</code></td>
+                <td><code>workspace-*</code></td>
+              </tr>
+              <tr>
+                <td>不想逐个选</td>
+                <td><code>agentscope[full]==2.0.11</code></td>
+                <td>全部</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct">不要一上来就装 full</span>
+          <p>
+            <code>full</code> 会把所有模型、存储、沙箱、渠道依赖一起装上，体积大、部分包在 Windows 上还需要编译。
+            先用核心包跑通 01–05 章，需要什么再加什么。
+          </p>
+        </div>
+
+        <h2 id="providers">模型接入：DeepSeek / OpenAI 兼容 / 本地 Ollama</h2>
+        <p>
+          AgentScope 把「凭证」和「模型」拆成两个对象：<code>Credential</code> 负责 API Key 与 base URL，
+          <code>ChatModel</code> 负责调用与解析。换厂商就是换一对类。
+        </p>
+        <h3>DeepSeek（本站默认）</h3>
+        <pre><code>from agentscope.credential import DeepSeekCredential
+from agentscope.model import DeepSeekChatModel
+
+model = DeepSeekChatModel(
+    credential=DeepSeekCredential(
+        api_key=os.environ["DEEPSEEK_API_KEY"],
+    ),
+    model="deepseek-chat",
+)</code></pre>
+        <p>
+          <code>DeepSeekCredential</code> 默认的 base URL 是 <code>https://api.deepseek.com</code>
+          <span class="src" data-src="src/agentscope/credential/_deepseek.py:12">_deepseek.py:12</span>。
+          如果你走代理，只改 <code>base_url</code> 即可。
+        </p>
+
+        <h3>任意 OpenAI 兼容端点</h3>
+        <pre><code>from agentscope.credential import OpenAICredential
+from agentscope.model import OpenAIChatModel
+
+model = OpenAIChatModel(
+    credential=OpenAICredential(
+        api_key=os.environ["OPENAI_API_KEY"],
+        base_url="https://your-gateway.example.com/v1",
+    ),
+    model="your-model-name",
+)</code></pre>
+
+        <h3>本地 Ollama</h3>
+        <pre><code># 先装 extra：uv pip install "agentscope[model-ollama]==2.0.11"
+from agentscope.credential import OllamaCredential
+from agentscope.model import OllamaChatModel
+
+model = OllamaChatModel(
+    credential=OllamaCredential(host="http://localhost:11434"),
+    model="qwen2.5:7b",
+)</code></pre>
+        <p>
+          Ollama 适合「完全零成本」验证流程，但工具调用能力取决于具体模型；遇到工具不被调用，先用 DeepSeek 复现一次。
+        </p>
+
+        <h2 id="cheatsheet">依赖与配置速查</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你需要</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>版本检查</td>
+                <td><code>python -c "import agentscope; print(agentscope.__version__)"</code></td>
+              </tr>
+              <tr>
+                <td>装核心包</td>
+                <td><code>uv pip install "agentscope==2.0.11"</code></td>
+              </tr>
+              <tr>
+                <td>DeepSeek key</td>
+                <td><code>DEEPSEEK_API_KEY</code></td>
+              </tr>
+              <tr>
+                <td>模型名</td>
+                <td><code>deepseek-chat</code>（对话）/ <code>deepseek-reasoner</code>（推理）</td>
+              </tr>
+              <tr>
+                <td>循环上限</td>
+                <td><code>ReActConfig(max_iters=50)</code>，默认 50</td>
+              </tr>
+              <tr>
+                <td>流式入口</td>
+                <td><code>agent.reply_stream(msg)</code> + <code>EventType.TEXT_BLOCK_DELTA</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">看到 <code>ModuleNotFoundError: No module named 'agentscope'</code></span>
+          <p>
+            虚拟环境没激活，或装到了别的 Python 上。先 <code>python -c "import sys; print(sys.executable)"</code>
+            确认解释器路径，再 <code>uv pip install</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">看到 401 / AuthenticationError</span>
+          <p>
+            key 没读到或已失效。<code>os.environ["DEEPSEEK_API_KEY"]</code> 在 key 不存在时会直接抛
+            <code>KeyError</code>，这比 401 更早暴露问题——所以示例故意用 <code>[]</code> 而不是 <code>getenv</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">看到 <code>RuntimeError: Agent did not produce a final message</code></span>
+          <p>
+            <code>reply()</code> 没有从事件流里取到最终 <code>Msg</code>
+            <span class="src" data-src="src/agentscope/agent/_agent.py:379">_agent.py:379</span>。
+            常见原因是循环被中断或超出上限；改用 <code>reply_stream()</code> 打印事件，能看到停在哪一步。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">Windows 上的两个小问题</span>
+          <p>
+            一是 PowerShell 里设置环境变量用 <code>$env:NAME="..."</code>，不是 <code>export</code>；
+            二是某些可选依赖需要编译工具链，先只用核心包，遇到再装。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li>如果我把 <code>toolkit</code> 换成 <code>Toolkit(tools=[...])</code>，<code>reply()</code> 的返回值结构会变吗？为什么？</li>
+          <li><code>stream=True</code> 是模型层的默认值，为什么 <code>reply()</code> 还能返回一条完整消息？</li>
+          <li><code>max_iters=50</code> 限制的是「模型调用次数」还是「工具调用次数」？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>把示例里的 <code>system_prompt</code> 改成「只用英文回答」，确认输出语言真的变了。</li>
+          <li>把 <code>reply()</code> 改成 <code>reply_stream()</code>，只打印 <code>TEXT_BLOCK_DELTA</code> 的 <code>delta</code>，观察首字延迟。</li>
+          <li>把 <code>DeepSeekChatModel</code> 换成 <code>OllamaChatModel</code>（本地已装 Ollama 的话），其余代码不动，确认能跑。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          环境通了，下一章进入 <strong>02 第一个 Agent</strong>：把这次「直接回答」扩展成真正会调用工具的循环，
+          并讲清 ReAct 的终止条件与状态从哪来。02 章尚未发布前，可以先读
+          <a href="00-study-map.html">00 学习地图</a> 里的依赖图，了解后面章节的顺序。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
