@@ -2,6 +2,19 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.12.0 — 2026-11-06
+
+新增第 12 章「工作区与沙箱」，让 Agent 真正读写文件、执行命令。
+
+- **三层**：Workspace（生命周期与资源）/ Backend（执行）/ Tool（模型动作）。
+- **LocalWorkspace**：`workdir` 布局、幂等 `initialize`、Windows 用 PowerShell。
+- **接入**：`list_tools` / `list_mcps` / `list_skills` / `offloader` 四条线。
+- **沙箱**：Docker（挂载）、E2B（沙箱文件系统）、K8s（Pod + PVC）与 Bubblewrap 的网络注意点。
+- **生命周期**：`initialize` / `close` / `reset` / `async with` 的区别。
+- **资源**：`default_mcps` / `skill_paths` 是种子而非共享实例，按 agent / session 隔离。
+- **MCP 网关**：沙箱内 FastAPI + Bearer，主机通过 `exec_shell` 走回环，`list_mcps` 接口不变。
+- **选型**：本地 / 容器 / 集群 / 云沙箱 / Bubblewrap 的隔离与持久化对照。
+
 ## v0.11.0 — 2026-11-06
 
 新增第 11 章「RAG 与长期记忆」，把「知识」和「记忆」拆成两条独立链路。

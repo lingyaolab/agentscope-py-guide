@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 工作区与沙箱：WorkspaceBase 三层结构、LocalWorkspace、Docker/E2B/K8s 沙箱、生命周期、list_tools/list_mcps/list_skills、MCP 网关与选型。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="12 工作区与沙箱：让 Agent 真的能读写和执行 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="WorkspaceBase 三层结构、LocalWorkspace、Docker/E2B/K8s 沙箱、生命周期、资源发现、MCP 网关与选型。" />
+    <title>12 工作区与沙箱：让 Agent 真的能读写和执行 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="12-workspace" data-root="..">
+    <main>
+      <article class="article">
+        <h1>12 · 工作区与沙箱</h1>
+        <p class="lede">
+          前面几章的 Agent 一直在「说」。这一章给它一个真正能动的环境：读写文件、执行命令、安装依赖，
+          并且把这些动作限制在一个可管理、可持久化、可销毁的边界里。
+          <strong>工作区（Workspace）</strong>就是这个边界。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>说清 Workspace / Backend / Tool 三层各自负责什么</li>
+          <li>用 <code>LocalWorkspace</code> 把工具、卸载器和会话目录接进 Agent</li>
+          <li>把同一份 Agent 代码切到 Docker / E2B / K8s，而不改业务逻辑</li>
+          <li>解释沙箱里的 MCP 为什么要经过网关，以及 <code>default_mcps</code> 并不是共享实例</li>
+        </ul>
+
+        <h2 id="why">先说为什么：Agent 不能只「建议」改文件</h2>
+        <p>
+          没有工作区时，模型只能输出「请把 main.py 第 10 行改成…」。真正执行的是人。
+          一旦要让它自动改代码、跑测试、装依赖，就必须回答四个问题：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>问题</th>
+                <th>工作区的回答</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>在哪执行？</td>
+                <td><code>workdir</code> + Backend（本机 / 容器 / 云沙箱）</td>
+              </tr>
+              <tr>
+                <td>执行完的东西还在吗？</td>
+                <td>持久化策略：主机目录、PVC、沙箱元数据</td>
+              </tr>
+              <tr>
+                <td>能碰主机吗？</td>
+                <td>隔离边界：容器 / 沙箱 / 命名空间</td>
+              </tr>
+              <tr>
+                <td>资源什么时候销毁？</td>
+                <td>生命周期：<code>initialize</code> / <code>close</code> / <code>reset</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          AgentScope 提供七种工作区实现，共享同一套接口：
+          <code>LocalWorkspace</code>、<code>BubblewrapWorkspace</code>、<code>DockerWorkspace</code>、
+          <code>E2BWorkspace</code>、<code>DaytonaWorkspace</code>、<code>K8sWorkspace</code>、
+          <code>OpenSandboxWorkspace</code>。
+        </p>
+
+        <h2 id="layers">三层：Workspace / Backend / Tool</h2>
+        <div class="stack">
+          <div class="layer accent">
+            <span class="lt">Workspace（生命周期与资源）</span>
+            <div class="ld">
+              管 <code>workdir</code>、MCP 声明、技能目录、卸载文件；负责 <code>initialize</code> / <code>close</code>。
+            </div>
+          </div>
+          <div class="layer in2">
+            <span class="lt">Backend（真正执行）</span>
+            <div class="ld">
+              <code>LocalBackend</code> 在本机读写；<code>DockerBackend</code> / <code>E2BBackend</code> 等把命令送进隔离环境。
+            </div>
+          </div>
+          <div class="layer in3">
+            <span class="lt">Tool（模型能调用的动作）</span>
+            <div class="ld">
+              <code>Bash</code> / <code>PowerShell</code> / <code>Read</code> / <code>Write</code> / <code>Edit</code> /
+              <code>Glob</code> / <code>Grep</code>，构造时绑定一个 backend。
+            </div>
+          </div>
+        </div>
+        <p>
+          <code>WorkspaceBase</code>
+          <span class="src" data-src="src/agentscope/workspace/_base.py:225">_base.py:225</span>
+          把方法分成四类：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>角色</th>
+                <th>方法</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>生命周期</td>
+                <td><code>initialize()</code><span class="src" data-src="src/agentscope/workspace/_base.py:494">_base.py:494</span>、<code>close()</code><span class="src" data-src="src/agentscope/workspace/_base.py:498">_base.py:498</span>、<code>reset()</code><span class="src" data-src="src/agentscope/workspace/_base.py:501">_base.py:501</span>、<code>async with</code><span class="src" data-src="src/agentscope/workspace/_base.py:533">_base.py:533</span></td>
+              </tr>
+              <tr>
+                <td>资源发现</td>
+                <td><code>list_tools()</code>、<code>list_mcps()</code>、<code>list_skills()</code>、<code>get_instructions()</code></td>
+              </tr>
+              <tr>
+                <td>上下文卸载</td>
+                <td><code>offload_context()</code>、<code>offload_tool_result()</code>、<code>offload_data_block()</code></td>
+              </tr>
+              <tr>
+                <td>动态管理</td>
+                <td><code>add_mcp()</code>、<code>remove_mcp()</code>、<code>add_skill()</code>、<code>remove_skill()</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="local">LocalWorkspace：最小可用</h2>
+        <p>
+          <code>LocalWorkspace</code>
+          <span class="src" data-src="src/agentscope/workspace/_local_workspace.py:65">_local_workspace.py:65</span>
+          直接在本机目录上工作，是开发阶段最省事的选择。
+        </p>
+        <pre><code>from agentscope.workspace import LocalWorkspace
+
+
+async def build_workspace() -&gt; LocalWorkspace:
+    workspace = LocalWorkspace(
+        workdir="/data/my-workspace",
+        default_mcps=[],
+        skill_paths=["./skills/web-search"],
+    )
+    await workspace.initialize()
+    return workspace</code></pre>
+        <p>目录布局是固定的：</p>
+        <pre><code>{workdir}/
+├── .mcp           # 按智能体 / 会话保存的 MCP 声明
+├── data/          # 卸载的多模态内容，按 SHA-256 去重
+├── skills/        # .seed 模板 + 按智能体隔离的技能目录
+└── sessions/      # 各会话的 context.jsonl 与工具结果文件</code></pre>
+        <p>
+          <code>initialize()</code>
+          <span class="src" data-src="src/agentscope/workspace/_local_workspace.py:164">_local_workspace.py:164</span>
+          是幂等的：已经初始化过就什么都不做。它只创建目录、恢复 MCP 声明、准备技能种子，
+          <strong>不会真的连接 MCP</strong>——客户端在第一次 <code>list_mcps</code> 时才构建。
+        </p>
+
+        <h2 id="integrate">接入 Agent：三条资源线</h2>
+        <p>工作区通过两条路径进入 Agent：资源来源，以及上下文卸载器。</p>
+        <pre><code>from agentscope.agent import Agent
+from agentscope.tool import Toolkit
+
+
+async def build_agent(workspace, model) -&gt; Agent:
+    agent_id = "coder"
+    session_id = "session-1"
+
+    return Agent(
+        name="coder",
+        system_prompt="你是一个编程助手。",
+        model=model,
+        toolkit=Toolkit(
+            tools=await workspace.list_tools(),
+            mcps=await workspace.list_mcps(
+                agent_id=agent_id,
+                session_id=session_id,
+            ),
+            skills_or_loaders=await workspace.list_skills(agent_id=agent_id),
+        ),
+        offloader=workspace,
+    )</code></pre>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>接入点</th>
+                <th>给 Agent 什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>tools=await workspace.list_tools()</code></td>
+                <td>已绑定后端的内置工具</td>
+              </tr>
+              <tr>
+                <td><code>mcps=await workspace.list_mcps(agent_id, session_id)</code></td>
+                <td>按智能体 / 会话隔离的 MCP 客户端</td>
+              </tr>
+              <tr>
+                <td><code>skills_or_loaders=await workspace.list_skills(agent_id)</code></td>
+                <td>技能目录</td>
+              </tr>
+              <tr>
+                <td><code>offloader=workspace</code></td>
+                <td>压缩与截断时的持久化目标</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="sandbox">沙箱：Docker / E2B / K8s</h2>
+        <p>
+          沙箱类工作区都继承 <code>SandboxedWorkspaceBase</code>
+          <span class="src" data-src="src/agentscope/workspace/_sandboxed_base.py:38">_sandboxed_base.py:38</span>，
+          比本地多出 <code>gateway_port</code>
+          <span class="src" data-src="src/agentscope/workspace/_sandboxed_base.py:55">_sandboxed_base.py:55</span>
+          与沙箱启动 / 销毁逻辑。
+        </p>
+        <h3>Docker</h3>
+        <p>
+          <code>DockerWorkspace</code>
+          <span class="src" data-src="src/agentscope/workspace/_docker/_docker_workspace.py:43">_docker_workspace.py:43</span>
+          把主机 <code>workdir</code> 挂到容器内 <code>/workspace</code>。容器重启后文件还在；
+          不传 <code>workdir</code> 就是纯临时容器。
+        </p>
+        <pre><code>from agentscope.workspace import DockerWorkspace
+
+
+async def build_docker() -&gt; DockerWorkspace:
+    workspace = DockerWorkspace(
+        base_image="python:3.11-slim",
+        workdir="/data/docker-workspaces/agent-1",
+        node_version="20",
+        extra_pip=["numpy", "pandas"],
+    )
+    await workspace.initialize()
+    return workspace</code></pre>
+        <h3>E2B</h3>
+        <p>
+          <code>E2BWorkspace</code>
+          <span class="src" data-src="src/agentscope/workspace/_e2b/_e2b_workspace.py:66">_e2b_workspace.py:66</span>
+          以云沙箱文件系统为持久化层，没有主机 <code>workdir</code>；重启后按沙箱元数据重连。
+        </p>
+        <pre><code>from agentscope.workspace import E2BWorkspace
+
+workspace = E2BWorkspace(
+    template="base",
+    api_key="your-e2b-api-key",
+    timeout_seconds=300,
+)</code></pre>
+        <h3>Kubernetes</h3>
+        <p>
+          <code>K8sWorkspace</code>
+          <span class="src" data-src="src/agentscope/workspace/_k8s/_k8s_workspace.py:55">_k8s_workspace.py:55</span>
+          为每个工作区起一个 Pod，并挂一个 PVC 做持久化。
+        </p>
+        <pre><code>from agentscope.workspace import K8sWorkspace
+
+workspace = K8sWorkspace(
+    namespace="agentscope",
+    image="python:3.11-slim",
+    storage_size="1Gi",
+)</code></pre>
+        <div class="callout warn">
+          <span class="ct">Bubblewrap 不隔离网络</span>
+          <p>
+            它不需要守护进程，但为了让 MCP 网关在多次 <code>bwrap</code> 执行之间可达，
+            必须共享主机网络命名空间。要网络隔离，用 Docker / K8s / 云沙箱。
+          </p>
+        </div>
+
+        <h2 id="lifecycle">生命周期：initialize / close / reset</h2>
+        <p>
+          三种终结方式的区别：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>操作</th>
+                <th>做什么</th>
+                <th>数据还在吗</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>initialize()</code></td>
+                <td>创建目录 / 启动容器或 Pod / 恢复声明</td>
+                <td>是</td>
+              </tr>
+              <tr>
+                <td><code>close()</code></td>
+                <td>停止容器 / 关闭连接 / 释放临时资源</td>
+                <td>持久化目录 / PVC 还在</td>
+              </tr>
+              <tr>
+                <td><code>reset()</code></td>
+                <td>清空工作区内容，重新开始</td>
+                <td>否</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <code>async with</code>
+          <span class="src" data-src="src/agentscope/workspace/_base.py:533">_base.py:533</span>
+          会自动调用 <code>initialize</code> 与 <code>close</code>，是最不容易漏掉清理的写法：
+        </p>
+        <pre><code>from agentscope.workspace import LocalWorkspace
+
+async def main() -&gt; None:
+    async with LocalWorkspace(workdir="./my-workspace") as workspace:
+        tools = await workspace.list_tools()
+        ...</code></pre>
+        <p>
+          沙箱类工作区的首次 <code>initialize</code> 可能很慢：OpenSandbox 要在沙箱内自举网关虚拟环境，
+          冷启动可能数分钟。这不是卡死。
+        </p>
+
+        <h2 id="tools">工作区工具：list_tools 给了什么</h2>
+        <p>
+          <code>LocalWorkspace.list_tools()</code>
+          <span class="src" data-src="src/agentscope/workspace/_local_workspace.py:141">_local_workspace.py:141</span>
+          返回六个工具，全部绑定到工作区后端：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>工具</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>Bash</code> / <code>PowerShell</code></td>
+                <td>Windows 自动用 PowerShell，其余用 Bash；<code>cwd</code> 是 <code>workdir</code></td>
+              </tr>
+              <tr>
+                <td><code>Edit</code></td>
+                <td>精确字符串替换</td>
+              </tr>
+              <tr>
+                <td><code>Glob</code></td>
+                <td>按文件名搜索，默认搜索目录是 <code>workdir</code></td>
+              </tr>
+              <tr>
+                <td><code>Grep</code></td>
+                <td>按内容搜索，默认搜索目录是 <code>workdir</code></td>
+              </tr>
+              <tr>
+                <td><code>Read</code></td>
+                <td>按行读取，支持图片 / PDF</td>
+              </tr>
+              <tr>
+                <td><code>Write</code></td>
+                <td>创建或覆写文件</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          在沙箱类工作区上，这些工具<strong>在容器或沙箱内部执行</strong>，不是在主机上。
+          你自己写的工具想享受同样的隔离，就把后端传进去：
+        </p>
+        <pre><code>from agentscope.tool import Bash
+
+bash = Bash(backend=workspace.get_backend())</code></pre>
+        <p>
+          <code>get_backend()</code>
+          <span class="src" data-src="src/agentscope/workspace/_base.py:514">_base.py:514</span>
+          返回当前工作区绑定的执行后端。忘了传，自定义工具就会在主机上跑。
+        </p>
+
+        <h2 id="resources">运行时资源：MCP 与技能</h2>
+        <p>
+          工作区不只是文件系统，它还管理两类资源：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>资源</th>
+                <th>发现</th>
+                <th>动态增删</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>MCP</td>
+                <td><code>list_mcps(agent_id, session_id)</code><span class="src" data-src="src/agentscope/workspace/_base.py:605">_base.py:605</span></td>
+                <td><code>add_mcp()</code> / <code>remove_mcp()</code></td>
+              </tr>
+              <tr>
+                <td>技能</td>
+                <td><code>list_skills(agent_id)</code><span class="src" data-src="src/agentscope/workspace/_base.py:1204">_base.py:1204</span></td>
+                <td><code>add_skill()</code> / <code>remove_skill()</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          构造参数里的 <code>default_mcps</code> 和 <code>skill_paths</code> 是<strong>种子</strong>，
+          不是共享实例。每个智能体 / 会话在第一次访问时拿到自己的 MCP 客户端；
+          每个智能体从 <code>skills/.seed</code> 复制出自己的技能分区。
+        </p>
+        <p>
+          工具太多时，建议用 <code>ToolGroup</code> 分组，让模型按需激活，而不是一次性塞进 Toolkit。
+        </p>
+
+        <h2 id="gateway">MCP 网关：沙箱里的工具怎么出来</h2>
+        <p>
+          沙箱类工作区不能直接注册主机侧的 MCP 客户端：MCP 服务器在容器内部，stdio 会话跨不过边界。
+          解决办法是一个运行在沙箱内部的轻量 FastAPI 网关：
+        </p>
+        <pre><code>主机                                     容器 / 云沙箱
+┌──────────────┐                        ┌────────────────────┐
+│ Agent        │   HTTPS + Bearer       │  MCP 网关 (FastAPI) │
+│ Toolkit      │ ─────────────────────▶ │    ├─ MCP 1 (stdio) │
+│ GatewayMCP.. │                        │    ├─ MCP 2 (http)  │
+└──────────────┘                        │    └─ MCP N         │
+                                        └────────────────────┘</code></pre>
+        <ul>
+          <li>网关只监听沙箱回环地址，不对外发布端口</li>
+          <li>每次 <code>initialize()</code> 生成工作区专属 Bearer 令牌</li>
+          <li>主机侧用 <code>GatewayMCPClient</code> / <code>GatewayMCPTool</code> 适配，接口仍是 <code>MCPClient</code></li>
+          <li>主机到网关的调用通过后端的 <code>exec_shell</code> 发 curl，不是直接连端口</li>
+        </ul>
+        <p>
+          所以 <code>list_mcps()</code> 在所有后端上返回的都是 <code>MCPClient</code> 实例，
+          上层工具代码不需要知道「这个 MCP 在本地还是沙箱里」。
+        </p>
+        <div class="callout tip">
+          <span class="ct">Bubblewrap 的两道额外防护</span>
+          <p>
+            它共享主机网络命名空间，理论上主机上其他进程能看到回环端口。因此网关额外要求
+            Bearer 令牌，并在 <code>/health</code> 响应里带一个启动时生成的随机数，避免端口竞争泄露令牌。
+          </p>
+        </div>
+
+        <h2 id="compare">选型：本地 / 容器 / 云沙箱</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>工作区</th>
+                <th>隔离</th>
+                <th>持久化</th>
+                <th>适合</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>LocalWorkspace</code></td>
+                <td>无</td>
+                <td>主机 <code>workdir</code></td>
+                <td>本地开发、调试、单机工具</td>
+              </tr>
+              <tr>
+                <td><code>DockerWorkspace</code></td>
+                <td>容器</td>
+                <td>主机目录挂载到 <code>/workspace</code></td>
+                <td>需要隔离又不想上云</td>
+              </tr>
+              <tr>
+                <td><code>K8sWorkspace</code></td>
+                <td>Pod</td>
+                <td>PVC</td>
+                <td>集群部署、多租户</td>
+              </tr>
+              <tr>
+                <td><code>E2B</code> / <code>Daytona</code> / <code>OpenSandbox</code></td>
+                <td>托管云沙箱</td>
+                <td>沙箱文件系统</td>
+                <td>不想自己运维容器 / 集群</td>
+              </tr>
+              <tr>
+                <td><code>BubblewrapWorkspace</code></td>
+                <td>Linux 命名空间</td>
+                <td>主机目录挂到 <code>/workspace</code></td>
+                <td>Linux 上轻量隔离，无守护进程</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>本地工作区</td><td><code>LocalWorkspace(workdir=...)</code></td></tr>
+              <tr><td>初始化</td><td><code>await workspace.initialize()</code> 或 <code>async with</code></td></tr>
+              <tr><td>拿工具</td><td><code>await workspace.list_tools()</code></td></tr>
+              <tr><td>拿 MCP</td><td><code>await workspace.list_mcps(agent_id=..., session_id=...)</code></td></tr>
+              <tr><td>拿技能</td><td><code>await workspace.list_skills(agent_id=...)</code></td></tr>
+              <tr><td>做卸载器</td><td><code>Agent(offloader=workspace)</code></td></tr>
+              <tr><td>自定义工具进沙箱</td><td><code>Bash(backend=workspace.get_backend())</code></td></tr>
+              <tr><td>销毁临时环境</td><td><code>await workspace.close()</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">忘了 <code>initialize()</code> 就直接用</span>
+          <p>
+            本地工作区可能只是目录不存在，沙箱类则根本没有容器 / Pod。统一用
+            <code>async with</code>，初始化与清理都不会漏。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">用完不 <code>close()</code></span>
+          <p>
+            Docker 容器、K8s Pod、云沙箱都会残留。尤其 K8s，PVC 不删会一直计费。
+            临时环境用 <code>async with</code>，长期环境也要在应用退出时显式关闭。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">自定义工具忘了传 backend</span>
+          <p>
+            <code>Bash()</code> 不传 <code>backend</code> 就用本地执行。在沙箱工作区里，
+            这等于把命令放回主机跑，隔离形同虚设。用 <code>Bash(backend=workspace.get_backend())</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">以为 <code>default_mcps</code> 是共享实例</span>
+          <p>
+            它是种子。每个智能体 / 会话第一次访问时拿到独立客户端。想让多个会话共享同一个状态连接，
+            需要自己在主机侧管理 <code>MCPClient</code>，而不是依赖工作区的种子。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">在 Windows 上找 <code>Bash</code></span>
+          <p>
+            <code>LocalWorkspace.list_tools()</code> 在 Windows 上返回 <code>PowerShell</code>，
+            不是 <code>Bash</code>。写死工具名做判断时要注意这一点。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">工具太多就用 ToolGroup</span>
+          <p>
+            工作区会把所有工具平铺出来。超过十几个时，模型选择成本明显上升。
+            按用途分组，让模型通过元工具按需激活，只保留 <code>basic</code> 组常驻。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li>Workspace、Backend、Tool 三层分别负责什么？换执行环境时改哪一层？</li>
+          <li><code>close()</code> 和 <code>reset()</code> 对数据的影响有什么不同？</li>
+          <li>沙箱里的 MCP 为什么要经过网关？主机为什么不直接连过去？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>用 <code>LocalWorkspace</code> 建工作区，让 Agent 写一个文件再读回来，确认文件落在 <code>workdir</code>。</li>
+          <li>把同一个 Agent 切到 <code>DockerWorkspace</code>，观察 <code>list_tools()</code> 与文件路径的变化。</li>
+          <li>故意不传 <code>backend</code> 构造一个 <code>Bash</code>，对比它和 <code>workspace.list_tools()</code> 里的 Bash 执行位置。</li>
+          <li>用 <code>async with</code> 包住工作区，退出后检查容器 / 临时目录是否被清理。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          工作区让 Agent 能动手，下一章 <strong>13 中断、恢复与状态</strong> 讲长任务怎么安全暂停：
+          中断运行中的回复、恢复挂起的工具调用、把 <code>AgentState</code> 存下来再接着跑。
+          13 章尚未发布前，可以先回 <a href="08-permission-hitl.html">08 权限与 HITL</a>
+          复习挂起事件。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
