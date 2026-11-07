@@ -556,6 +556,14 @@ class ConcurrencyLimitMiddleware(MiddlewareBase):
           </table>
         </div>
         <div class="callout warn">
+          <span class="ct">多副本部署在官方文档里仍标注为 WIP</span>
+          <p>
+            Redis 已经承载了共享状态，但“分布式部署”仍被官方标为开发中。
+            上线前应在预发做故障注入：杀副本、断 Redis、滚动发布，
+            确认会话锁、事件回放与唤醒行为符合预期。
+          </p>
+        </div>
+        <div class="callout warn">
           <span class="ct">多副本都开调度会重复执行</span>
           <p>
             APScheduler 的 jobstore 在内存里，每个持有定时器的进程都会响应 cron。
