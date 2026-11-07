@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 术语表：Agent、Msg、ContentBlock、Tool、Middleware、Permission、Workspace、Session、Storage、MessageBus、Channel、Hub、A2A、Realtime 等核心词的中英对照与一句话直觉。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="A 术语表：中英对照 + 一句话直觉 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="核心概念、运行时与服务、协议与扩展三组术语的中英对照与章节索引。" />
+    <title>A 术语表：中英对照 + 一句话直觉 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="appendix-glossary" data-root="..">
+    <main>
+      <article class="article">
+        <h1>A · 术语表</h1>
+        <p class="lede">
+          同一个词在 AgentScope、OpenAI、MCP、A2A 里可能不是一回事。
+          这份表只给「一句话直觉」和「第一次出现在哪一章」，
+          需要细节时再点回正文。
+        </p>
+
+        <h2 id="how-to-use">怎么用这份表</h2>
+        <ul>
+          <li>先看「一句话直觉」，能复述就不必背定义</li>
+          <li>看到「章节」列的数字，回对应正文看代码与出处</li>
+          <li>英文列用于搜索源码、日志与报错</li>
+        </ul>
+        <div class="callout tip">
+          <span class="ct">两个最容易混的词</span>
+          <p>
+            <strong>Session</strong> 是「一段对话」，<strong>Run</strong> 是「一次执行」。
+            一个 Session 可以有很多 Run；同一 Session 同时只能有一个 Run。
+          </p>
+        </div>
+
+        <h2 id="core">核心概念</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>中文</th>
+                <th>English</th>
+                <th>一句话直觉</th>
+                <th>章节</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>智能体</td><td>Agent</td><td>带模型、工具、状态与循环的执行者</td><td>02</td></tr>
+              <tr><td>消息</td><td>Msg</td><td>一次输入或输出的容器，内容是 content blocks</td><td>03</td></tr>
+              <tr><td>内容块</td><td>ContentBlock</td><td>文本、思考、工具调用、工具结果、数据、提示的统一基类</td><td>03</td></tr>
+              <tr><td>文本块</td><td>TextBlock</td><td>纯文本片段</td><td>03</td></tr>
+              <tr><td>思考块</td><td>ThinkingBlock</td><td>模型的推理过程，不一定展示给用户</td><td>03</td></tr>
+              <tr><td>工具调用块</td><td>ToolCallBlock</td><td>模型要求执行某个工具及参数；1.x 叫 ToolUseBlock</td><td>03、05</td></tr>
+              <tr><td>工具结果块</td><td>ToolResultBlock</td><td>工具执行结果与状态</td><td>03、05</td></tr>
+              <tr><td>数据块</td><td>DataBlock</td><td>图片 / 音频 / 文件，1.x 的 Image/Audio/Video 统一成它</td><td>03、25</td></tr>
+              <tr><td>提示块</td><td>HintBlock</td><td>运行时注入的引导信息</td><td>06、15</td></tr>
+              <tr><td>对话模型</td><td>ChatModel</td><td>把消息变成模型响应的适配器</td><td>04</td></tr>
+              <tr><td>凭证</td><td>Credential</td><td>API key 与连接配置，可被多个模型复用</td><td>04、15</td></tr>
+              <tr><td>格式化器</td><td>Formatter</td><td>把 Msg 转成 provider 的请求格式</td><td>04</td></tr>
+              <tr><td>工具包</td><td>Toolkit</td><td>工具、MCP、技能、工具组的统一注册处</td><td>05</td></tr>
+              <tr><td>工具</td><td>Tool</td><td>可被模型调用的函数或外部服务</td><td>05</td></tr>
+              <tr><td>技能</td><td>Skill</td><td>带 SKILL.md 的文件夹，告诉模型怎么做一类事</td><td>05、19</td></tr>
+              <tr><td>状态</td><td>AgentState</td><td>上下文、回复 id、权限上下文、任务上下文</td><td>07、13</td></tr>
+              <tr><td>上下文</td><td>Context</td><td>本次推理要发给模型的消息列表</td><td>06</td></tr>
+              <tr><td>卸载器</td><td>Offloader</td><td>把压缩上下文与超大工具结果写到工作区</td><td>06、12</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="runtime">运行时与服务</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>中文</th>
+                <th>English</th>
+                <th>一句话直觉</th>
+                <th>章节</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>中间件</td><td>Middleware</td><td>在 reply / 推理 / 工具 / 模型调用前后插逻辑</td><td>07</td></tr>
+              <tr><td>权限</td><td>Permission</td><td>决定一次工具调用是允许、拒绝还是询问</td><td>08</td></tr>
+              <tr><td>人类介入</td><td>HITL</td><td>暂停等待用户确认或补充输入</td><td>08、13</td></tr>
+              <tr><td>工作区</td><td>Workspace</td><td>文件、MCP、技能、卸载内容的运行时容器</td><td>12</td></tr>
+              <tr><td>管道</td><td>Pipeline</td><td>把多个 Agent 按固定顺序或目标串起来</td><td>09、10</td></tr>
+              <tr><td>团队</td><td>Team</td><td>Leader 派生 worker 并协调任务</td><td>17</td></tr>
+              <tr><td>会话</td><td>Session</td><td>一段持续对话及其状态</td><td>15、16</td></tr>
+              <tr><td>运行</td><td>Run</td><td>一次 reply 执行；同一会话同时只能有一个</td><td>15、23</td></tr>
+              <tr><td>存储</td><td>Storage</td><td>Agent、会话、凭证、消息、调度的持久化</td><td>15、23</td></tr>
+              <tr><td>消息总线</td><td>MessageBus</td><td>会话锁、事件回放、收件箱与唤醒</td><td>15、23</td></tr>
+              <tr><td>渠道</td><td>Channel</td><td>飞书 / 钉钉 / Discord 等 IM 适配器</td><td>18</td></tr>
+              <tr><td>中心</td><td>Hub</td><td>可浏览、安装的 MCP / 技能目录</td><td>19</td></tr>
+              <tr><td>追踪</td><td>Trace / Span</td><td>一次请求拆成有父子关系的耗时节点</td><td>21</td></tr>
+              <tr><td>跨度</td><td>Span</td><td>追踪里的一个操作节点</td><td>21</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="protocol">协议与扩展</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>中文</th>
+                <th>English</th>
+                <th>一句话直觉</th>
+                <th>章节</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>模型上下文协议</td><td>MCP</td><td>Agent 用外部工具的标准连接方式</td><td>05、19</td></tr>
+              <tr><td>智能体间协议</td><td>A2A</td><td>Agent 找 Agent 的标准消息协议</td><td>24</td></tr>
+              <tr><td>智能体卡</td><td>Agent Card</td><td>A2A 对端的自描述文件</td><td>24</td></tr>
+              <tr><td>上下文标识</td><td>context_id</td><td>A2A 的一段远端会话</td><td>24</td></tr>
+              <tr><td>任务标识</td><td>task_id</td><td>A2A 的一次执行单元，不等于一次 reply</td><td>24</td></tr>
+              <tr><td>语音合成</td><td>TTS</td><td>文本转音频</td><td>25</td></tr>
+              <tr><td>语音识别</td><td>ASR</td><td>音频转文本</td><td>25</td></tr>
+              <tr><td>语音到语音</td><td>Realtime</td><td>音频直接进出模型，支持打断</td><td>25</td></tr>
+              <tr><td>回合整理</td><td>TurnAggregator</td><td>合并被停顿切开的转写、过滤纯应答</td><td>25</td></tr>
+              <tr><td>资源共享</td><td>Resource Access Policy</td><td>决定跨用户可见性与可编辑性</td><td>20</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="index">按章节查</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>想找什么</th>
+                <th>先看</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Agent 怎么跑一轮</td><td><a href="../chapters/02-first-agent.html">02 第一个 Agent</a>、<a href="../chapters/03-message-event.html">03 消息与事件</a></td></tr>
+              <tr><td>工具怎么注册、怎么调</td><td><a href="../chapters/05-tool.html">05 工具系统</a></td></tr>
+              <tr><td>权限与打断</td><td><a href="../chapters/08-permission-hitl.html">08 权限与 HITL</a>、<a href="../chapters/13-interrupt-resume.html">13 中断与恢复</a></td></tr>
+              <tr><td>服务、会话、SSE</td><td><a href="../chapters/15-agent-service.html">15 Agent Service</a>、<a href="../chapters/16-session-sse.html">16 会话与 SSE</a></td></tr>
+              <tr><td>多智能体与工作流</td><td><a href="../chapters/09-pipeline.html">09 管道</a>、<a href="../chapters/10-plan-sop.html">10 计划与 SOP</a>、<a href="../chapters/17-agent-team.html">17 团队</a></td></tr>
+              <tr><td>RAG 与记忆</td><td><a href="../chapters/11-rag-memory.html">11 RAG 与记忆</a></td></tr>
+              <tr><td>上线与观测</td><td><a href="../chapters/21-observability.html">21 可观测性</a>、<a href="../chapters/23-production.html">23 生产化</a></td></tr>
+              <tr><td>综合案例</td><td><a href="../chapters/26-capstone.html">26 综合案例</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

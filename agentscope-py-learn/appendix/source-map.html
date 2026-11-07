@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 源码地图：agent、model、tool、message、event、middleware、workspace、rag、realtime、app 的职责、入口文件与推荐阅读顺序。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="E 源码地图：agentscope 的模块怎么分 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="模块职责、入口文件与按章节的阅读顺序。" />
+    <title>E 源码地图：agentscope 的模块怎么分 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="appendix-source-map" data-root="..">
+    <main>
+      <article class="article">
+        <h1>E · 源码地图</h1>
+        <p class="lede">
+          读源码最怕「打开仓库不知道从哪进」。这一页按模块给职责、入口文件与阅读顺序，
+          每个入口都能从正文的出处胶囊点回来。
+        </p>
+
+        <h2 id="layout">顶层目录</h2>
+        <pre><code>src/agentscope/
+├── agent/          # Agent、ReAct 循环、配置、状态、Realtime、A2A
+├── model/          # ChatModel 基类、响应、usage、各家 provider
+├── tool/           # Toolkit、ToolBase、内置工具、MCP 适配
+├── message/        # Msg 与各类 ContentBlock
+├── event/          # AgentEvent 定义
+├── middleware/      # 中间件基类、tracing、budget、RAG、长期记忆
+├── workspace/       # 工作区抽象与本地 / 沙箱实现
+├── rag/            # 知识库、文档、切块、向量库
+├── pipeline/        # Goal / Team 管道
+├── realtime/        # 实时语音模型、传输、VAD、事件
+├── tts/            # 语音合成模型
+├── asr/            # 语音识别模型
+├── state/          # AgentState、A2A 状态
+├── permission/      # 权限引擎、规则、模式
+├── credential/      # 凭证基类与各家实现
+├── formatter/       # provider 消息格式化
+├── app/            # FastAPI Agent Service
+└── console/         # 终端 UI 与渲染</code></pre>
+
+        <h2 id="agent">agent：推理循环与状态</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>文件</th>
+                <th>职责</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>agent/_agent.py</code></td><td><code>Agent</code> 主体：reply / reply_stream、ReAct 循环、工具执行、上下文压缩</td></tr>
+              <tr><td><code>agent/_config.py</code></td><td><code>ContextConfig</code>、<code>ReActConfig</code>、<code>ModelConfig</code>、<code>InjectionConfig</code></td></tr>
+              <tr><td><code>agent/_realtime/</code></td><td><code>RealtimeAgent</code>、<code>TurnAggregator</code>、<code>TurnMetrics</code></td></tr>
+              <tr><td><code>agent/_a2a_agent.py</code></td><td><code>A2AAgent</code> 客户端适配器</td></tr>
+              <tr><td><code>state/_state.py</code></td><td><code>AgentState</code>：上下文、reply id、权限 / 任务上下文</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          入口：<span class="src" data-src="src/agentscope/agent/_agent.py:121">_agent.py:121</span>
+          的 <code>__init__</code>，再到
+          <span class="src" data-src="src/agentscope/agent/_agent.py:289">_agent.py:289</span>
+          的 <code>reply_stream</code>；内部实现从
+          <span class="src" data-src="src/agentscope/agent/_agent.py:901">_agent.py:901</span>
+          的 <code>_reply</code> 开始。
+        </p>
+
+        <h2 id="model">model：模型与格式</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>文件</th>
+                <th>职责</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>model/_base.py</code></td><td><code>ChatModelBase</code>：调用、重试、token 估算</td></tr>
+              <tr><td><code>model/_model_response.py</code></td><td><code>ChatResponse</code>、<code>StructuredResponse</code></td></tr>
+              <tr><td><code>model/_model_usage.py</code></td><td><code>ChatUsage</code></td></tr>
+              <tr><td><code>model/_openai_chat/</code>、<code>_dashscope/</code> 等</td><td>各家 provider 的请求 / 流式解析</td></tr>
+              <tr><td><code>formatter/</code></td><td>把 <code>Msg</code> 转成 provider 请求格式</td></tr>
+              <tr><td><code>credential/</code></td><td>API key、base_url、模型 / TTS / ASR 发现</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          入口：<span class="src" data-src="src/agentscope/model/_base.py:62">_base.py:62</span>
+          的构造与
+          <span class="src" data-src="src/agentscope/model/_base.py:184">_base.py:184</span>
+          的 <code>__call__</code>；具体 provider 只看对应目录的 <code>_call_api</code>。
+        </p>
+
+        <h2 id="tool">tool：工具与 MCP</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>文件</th>
+                <th>职责</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>tool/_toolkit.py</code></td><td>工具、技能、MCP、工具组的统一注册与调用</td></tr>
+              <tr><td><code>tool/_base.py</code></td><td><code>ToolBase</code>、<code>ParamsBase</code>、工具中间件</td></tr>
+              <tr><td><code>tool/_adapters.py</code></td><td><code>FunctionTool</code>、<code>MCPTool</code></td></tr>
+              <tr><td><code>tool/_builtin/</code></td><td>Bash、Edit、Glob、Grep、Read、Write 与沙箱后端</td></tr>
+              <tr><td><code>tool/_task.py</code></td><td>TaskCreate / TaskGet / TaskList / TaskUpdate</td></tr>
+              <tr><td><code>mcp/</code></td><td>MCP 客户端、stdio / http 配置</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          入口：<span class="src" data-src="src/agentscope/tool/_toolkit.py:88">_toolkit.py:88</span>
+          的构造与
+          <span class="src" data-src="src/agentscope/tool/_toolkit.py:225">_toolkit.py:225</span>
+          的 <code>call_tool</code>。
+        </p>
+
+        <h2 id="message-event">message / event：消息与事件</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>文件</th>
+                <th>职责</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>message/_block.py</code></td><td><code>TextBlock</code>、<code>ToolCallBlock</code>、<code>DataBlock</code>、状态枚举</td></tr>
+              <tr><td><code>message/_base.py</code></td><td><code>Msg</code>、<code>Usage</code>、<code>UserMsg</code> 等工厂</td></tr>
+              <tr><td><code>event/_event.py</code></td><td><code>ReplyStartEvent</code>、<code>ToolResultEndEvent</code> 等所有事件</td></tr>
+              <tr><td><code>types/</code></td><td><code>ReplyFinishedReason</code>、<code>ErrorType</code> 等共享类型</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          入口：<span class="src" data-src="src/agentscope/message/_base.py:70">_base.py:70</span>
+          的 <code>Msg</code> 与
+          <span class="src" data-src="src/agentscope/event/_event.py:69">_event.py:69</span>
+          的 <code>EventBase</code>。
+        </p>
+
+        <h2 id="middleware">middleware：扩展点</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>文件</th>
+                <th>职责</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>middleware/_base.py</code></td><td><code>MiddlewareBase</code> 的 7 个 hook</td></tr>
+              <tr><td><code>middleware/_tracing/</code></td><td><code>TracingMiddleware</code>、span 属性与转换</td></tr>
+              <tr><td><code>middleware/_budget.py</code></td><td><code>ReplyBudgetControlMiddleware</code></td></tr>
+              <tr><td><code>middleware/_rag.py</code></td><td><code>RAGMiddleware</code></td></tr>
+              <tr><td><code>middleware/_longterm_memory/</code></td><td>Agentic / Mem0 / ReMe 长期记忆</td></tr>
+              <tr><td><code>middleware/_model_router.py</code></td><td>按输入选择候选模型</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="workspace-rag">workspace / rag：运行环境与知识</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>文件</th>
+                <th>职责</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>workspace/_base.py</code></td><td><code>WorkspaceBase</code>：文件、MCP、技能、卸载</td></tr>
+              <tr><td><code>workspace/_local_workspace.py</code></td><td>本地文件系统实现</td></tr>
+              <tr><td><code>workspace/_sandboxed_base.py</code></td><td>Docker / E2B 等沙箱基类</td></tr>
+              <tr><td><code>rag/_knowledge.py</code></td><td><code>KnowledgeBase.search</code> / 文档管理</td></tr>
+              <tr><td><code>rag/_vdb/</code></td><td>Qdrant / Milvus / MongoDB / Elasticsearch 向量库</td></tr>
+              <tr><td><code>app/rag/</code></td><td>知识库管理器、索引 worker、文档解析</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="app">app：Agent Service</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>文件</th>
+                <th>职责</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>app/_app.py</code></td><td><code>create_app</code> 与路由注册</td></tr>
+              <tr><td><code>app/_lifespan.py</code></td><td>启动 / 关闭资源栈</td></tr>
+              <tr><td><code>app/deps.py</code></td><td>FastAPI 依赖：身份、存储、总线、服务</td></tr>
+              <tr><td><code>app/_service/_chat.py</code></td><td>组装 Agent、加中间件、驱动 reply</td></tr>
+              <tr><td><code>app/_router/</code></td><td>chat / session / agent / credential / workspace / realtime 等端点</td></tr>
+              <tr><td><code>app/storage/</code></td><td>RedisStorage、AsyncSQLAlchemyStorage</td></tr>
+              <tr><td><code>app/message_bus/</code></td><td>InMemory / Redis 消息总线、会话锁</td></tr>
+              <tr><td><code>app/workspace_manager/</code></td><td>Local / Docker / E2B 工作区管理</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          入口：<span class="src" data-src="src/agentscope/app/_app.py:113">_app.py:113</span>
+          的 <code>create_app</code>；运行路径从
+          <span class="src" data-src="src/agentscope/app/_service/_chat.py:164">_chat.py:164</span>
+          的构造开始，到
+          <span class="src" data-src="src/agentscope/app/_service/_chat.py:1015">_chat.py:1015</span>
+          注入中间件。
+        </p>
+
+        <h2 id="realtime">realtime / tts / asr：语音</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>文件</th>
+                <th>职责</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>realtime/_base.py</code></td><td><code>RealtimeModelBase</code> 与能力声明</td></tr>
+              <tr><td><code>realtime/_transport/</code></td><td><code>TransportBase</code>、<code>LocalAudioTransport</code>、音频帧</td></tr>
+              <tr><td><code>realtime/_vad.py</code></td><td>本地语音活动检测接口</td></tr>
+              <tr><td><code>tts/_tts_base.py</code></td><td><code>TTSModelBase</code>、<code>push</code> / <code>synthesize</code></td></tr>
+              <tr><td><code>asr/_asr_base.py</code></td><td><code>ASRModelBase</code>、批量 / 实时接口</td></tr>
+              <tr><td><code>app/_service/_webrtc_session.py</code></td><td>浏览器 WebRTC 会话</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="reading">推荐阅读顺序</h2>
+        <ol>
+          <li>先读 <code>message/_base.py</code> 与 <code>_block.py</code>，理解数据形状</li>
+          <li>再读 <code>model/_base.py</code>，理解一次模型调用怎么重试与流式</li>
+          <li>读 <code>tool/_base.py</code> 与 <code>_toolkit.py</code>，理解工具生命周期</li>
+          <li>读 <code>agent/_agent.py</code> 的 <code>_reply</code>，把前三者串起来</li>
+          <li>读 <code>middleware/_base.py</code>，理解扩展点</li>
+          <li>读 <code>app/_service/_chat.py</code>，理解服务层怎么组装</li>
+          <li>最后读 <code>realtime/</code> 与 <code>workspace/</code>，按需深入</li>
+        </ol>
+        <div class="callout tip">
+          <span class="ct">用正文的出处胶囊跳转</span>
+          <p>
+            每章的关键结论都带 <code>file:line</code>。先跟着正文读入口，
+            再回到这份地图看全局，比从目录硬啃快得多。
+          </p>
+        </div>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

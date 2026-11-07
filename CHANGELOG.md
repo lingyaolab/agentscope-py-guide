@@ -2,6 +2,17 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.27.0 — 2026-11-07
+
+新增附录 A–F，站点内容全部完成。
+
+- **A 术语表**：核心概念、运行时与服务、协议与扩展三组中英对照，附章节索引。
+- **B 报错速查**：HTTP 401/403/404/409/422/429/503、启动、模型、工具、服务、语音与 A2A 的「看到 X → 因为 Y → 改成 Z」。
+- **C API 速查**：Agent、模型、Toolkit、消息事件、中间件、create_app、Workspace/RAG/语音的签名与默认值。
+- **D 版本迁移**：1.x → 2.0 的破坏性变化、Agent 调用、消息块、工具、模型、服务、memory 移除、顺序与清单。
+- **E 源码地图**：顶层目录与 agent/model/tool/message/event/middleware/workspace/rag/app/realtime 的入口文件。
+- **F Java 对照**：Reactor vs asyncio、HarnessAgent vs Agent、@Tool vs FunctionTool、状态存储、服务形态、团队与 A2A、迁移清单。
+
 ## v0.26.0 — 2026-11-07
 
 新增第 26 章「综合案例：一个可上线的 Agent 服务（附 Java 对照）」，正文完结。

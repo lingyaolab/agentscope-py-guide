@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Java 2.0.4 与 Python 2.0.11 对照：HarnessAgent 与 Agent、Reactor 与 asyncio、@Tool 与 FunctionTool、消息块、状态存储、服务形态、团队与 A2A、迁移清单。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="F Java ↔ Python 对照表 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="同一概念在两套实现里的类名、代码形状、服务形态与迁移清单。" />
+    <title>F Java ↔ Python 对照表 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="appendix-java-python" data-root="..">
+    <main>
+      <article class="article">
+        <h1>F · Java ↔ Python 对照</h1>
+        <p class="lede">
+          两个站讲的是同一套概念，但工程形态不同。
+          这一页只做「同名不同物」与「同物不同名」的对照，方便从 Java 站迁移或两边交叉阅读。
+        </p>
+
+        <h2 id="mental">先换脑子：Reactor vs asyncio</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Java 2.0.4</th>
+                <th>Python 2.0.11</th>
+                <th>注意</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>Mono&lt;T&gt;</code></td><td><code>Awaitable[T]</code> / 协程</td><td>一个结果</td></tr>
+              <tr><td><code>Flux&lt;T&gt;</code></td><td><code>AsyncGenerator[T, None]</code></td><td>多个结果 / 事件流</td></tr>
+              <tr><td><code>.block()</code></td><td><code>await ...</code></td><td>同步等待；不要在事件循环里阻塞</td></tr>
+              <tr><td>取消订阅</td><td>取消 task / <code>aclose()</code></td><td>生成器关闭要释放资源</td></tr>
+              <tr><td>背压</td><td>消费速度 / 有界队列</td><td>Python 异步生成器没有自动背压</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct">不要机械翻译链式调用</span>
+          <p>
+            Java 的 <code>flatMap</code> / <code>concatMap</code> 在 Python 里通常变成
+            <code>async for</code> 或 <code>asyncio.gather</code>；
+            先想清楚顺序、并发与取消，再写代码。
+          </p>
+        </div>
+
+        <h2 id="agent">Agent 装配</h2>
+        <pre><code>HarnessAgent agent = HarnessAgent.builder()
+        .name("note-taker")
+        .sysPrompt("你是一个帮助用户做笔记的助手。")
+        .model("dashscope:qwen-plus")
+        .workspace(Paths.get(".agentscope/workspace"))
+        .build();
+
+RuntimeContext ctx = RuntimeContext.builder()
+        .sessionId("demo-session")
+        .userId("alice")
+        .build();
+
+agent.call(new UserMessage("我叫天宇。"), ctx).block();</code></pre>
+        <pre><code>from agentscope.agent import Agent
+from agentscope.credential import DashScopeCredential
+from agentscope.model import DashScopeChatModel
+
+
+async def main() -&gt; None:
+    agent = Agent(
+        name="note-taker",
+        system_prompt="你是一个帮助用户做笔记的助手。",
+        model=DashScopeChatModel(
+            credential=DashScopeCredential(
+                api_key="...",
+            ),
+            model="qwen-plus",
+        ),
+    )
+    msg = await agent.reply(
+        UserMsg(name="user", content="我叫天宇。"),
+    )
+    print(msg.get_text_content())</code></pre>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>概念</th>
+                <th>Java</th>
+                <th>Python</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Agent 类</td><td><code>HarnessAgent</code> / <code>ReActAgent</code></td><td><code>Agent</code></td></tr>
+              <tr><td>模型</td><td><code>"dashscope:qwen-plus"</code> 由 ModelRegistry 解析</td><td><code>DashScopeChatModel(...)</code> 显式构造</td></tr>
+              <tr><td>会话上下文</td><td><code>RuntimeContext</code>（userId / sessionId）</td><td><code>AgentState.session_id</code> / 服务层会话</td></tr>
+              <tr><td>调用</td><td><code>call(...)</code> / <code>streamEvents()</code></td><td><code>reply(...)</code> / <code>reply_stream(...)</code></td></tr>
+              <tr><td>阻塞</td><td><code>.block()</code></td><td><code>await</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="tools">工具</h2>
+        <pre><code>public class WeatherTools {
+    @Tool(
+        name = "get_weather",
+        description = "查询指定城市的当前天气。",
+        readOnly = true)
+    public String getWeather(
+        @ToolParam(name = "city", description = "城市名，例如 杭州") String city) {
+        return city + ": 24°C";
+    }
+}
+
+Toolkit toolkit = new Toolkit();
+toolkit.registerTool(new WeatherTools());</code></pre>
+        <pre><code>from agentscope.tool import FunctionTool, Toolkit
+
+
+def get_weather(city: str) -&gt; str:
+    """查询指定城市的当前天气。"""
+    return f"{city}: 24°C"
+
+
+toolkit = Toolkit(tools=[FunctionTool(get_weather)])</code></pre>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>概念</th>
+                <th>Java</th>
+                <th>Python</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>声明工具</td><td><code>@Tool</code> + <code>@ToolParam</code></td><td>函数签名 + docstring，或 <code>ToolBase</code> 子类</td></tr>
+              <tr><td>注册</td><td><code>toolkit.registerTool(obj)</code></td><td><code>Toolkit(tools=[...])</code> / <code>add_tool</code></td></tr>
+              <tr><td>只读标记</td><td><code>readOnly = true</code></td><td><code>is_read_only=True</code></td></tr>
+              <tr><td>权限</td><td>权限系统</td><td><code>PermissionDecision</code> / <code>PermissionEngine</code></td></tr>
+              <tr><td>MCP</td><td><code>Toolkit</code> 注册 MCP</td><td><code>MCPClient</code> + <code>Toolkit(mcps=[...])</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="messages">消息与事件</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>概念</th>
+                <th>Java</th>
+                <th>Python</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>用户消息</td><td><code>UserMessage</code></td><td><code>UserMsg</code></td></tr>
+              <tr><td>助手消息</td><td><code>AssistantMessage</code></td><td><code>AssistantMsg</code></td></tr>
+              <tr><td>工具调用块</td><td><code>ToolUseBlock</code></td><td><code>ToolCallBlock</code></td></tr>
+              <tr><td>工具结果块</td><td><code>ToolResultBlock</code></td><td><code>ToolResultBlock</code></td></tr>
+              <tr><td>文本块</td><td><code>TextBlock</code></td><td><code>TextBlock</code></td></tr>
+              <tr><td>多模态</td><td>图片 / 音频 / 视频块</td><td>统一 <code>DataBlock</code> + <code>media_type</code></td></tr>
+              <tr><td>流式事件</td><td><code>streamEvents()</code> 的 Reactor 流</td><td><code>reply_stream()</code> 的 AgentEvent</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="state">状态与存储</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>概念</th>
+                <th>Java 2.0.4</th>
+                <th>Python 2.0.11</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>运行时状态</td><td><code>AgentState</code></td><td><code>AgentState</code></td></tr>
+              <tr><td>本地落盘</td><td>Harness 会话目录 / JSON</td><td>由你的应用或 <code>StorageBase</code> 负责</td></tr>
+              <tr><td>服务存储</td><td>Service 的 PostgreSQL</td><td><code>RedisStorage</code> / <code>AsyncSQLAlchemyStorage</code></td></tr>
+              <tr><td>会话锁</td><td>Service 层</td><td><code>MessageBus</code> 的分布式锁</td></tr>
+              <tr><td>事件回放</td><td>Service 的事件存储</td><td><code>RedisMessageBus</code> 的回放日志</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="service">服务形态</h2>
+        <p>
+          这是两套实现差异最大的地方：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>维度</th>
+                <th>Java 2.0.4</th>
+                <th>Python 2.0.11</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>服务入口</td><td><code>agentscope-service</code> 的 Go 网关 + 运行时</td><td><code>create_app</code> 的 FastAPI</td></tr>
+              <tr><td>资源模型</td><td>Service 的 Agent / Session / Run / Attempt</td><td>Agent / Session / Workspace / Schedule / Credential</td></tr>
+              <tr><td>鉴权</td><td>网关负责</td><td><code>get_current_user_id</code> 依赖可覆盖</td></tr>
+              <tr><td>协议</td><td>Endpoint / SSE / 控制面</td><td>REST + SSE + 可选 AG-UI / A2A</td></tr>
+              <tr><td>部署</td><td>Compose / K8s / PostgreSQL</td><td>Docker / uvicorn / Redis 或 SQL</td></tr>
+              <tr><td>扩展</td><td>运行时 + 网关分层扩展</td><td><code>extra_middlewares</code> / <code>extra_agent_*</code> / 自定义依赖</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct">Python 的 create_app 不是 Java Service 的端口</span>
+          <p>
+            Java 的 Service 是独立控制面 + 网关；Python 的 <code>create_app</code>
+            把 API、会话、存储、SSE 放在一个进程里。先跑通单体，再按需要拆 worker。
+          </p>
+        </div>
+
+        <h2 id="team-a2a">团队与 A2A</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>概念</th>
+                <th>Java 2.0.4</th>
+                <th>Python 2.0.11</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>团队</td><td>Team 协议 / Leader-worker</td><td><code>TeamPipeline</code> / 团队工具</td></tr>
+              <tr><td>子 Agent</td><td>Team 成员</td><td><code>AgentCreate</code> / <code>SubAgentTemplate</code></td></tr>
+              <tr><td>A2A 客户端</td><td>协议扩展</td><td><code>A2AAgent</code></td></tr>
+              <tr><td>A2A 服务端</td><td>协议扩展 / 网关</td><td>官方 <code>a2a-sdk</code> + <code>AgentExecutor</code></td></tr>
+              <tr><td>实时语音</td><td>按版本能力</td><td><code>RealtimeAgent</code> + WebRTC / 本地声卡</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="migration">迁移清单</h2>
+        <ol>
+          <li><strong>先统一术语</strong>：ToolUse → ToolCall，RuntimeContext → AgentState / 会话</li>
+          <li><strong>再换异步模型</strong>：Mono / Flux → await / async for，取消与关闭要显式处理</li>
+          <li><strong>再换 Agent</strong>：HarnessAgent builder → Agent 构造 + create_app</li>
+          <li><strong>再换工具</strong>：<code>@Tool</code> → <code>FunctionTool</code>，权限用 <code>PermissionDecision</code></li>
+          <li><strong>再换服务</strong>：不要照搬 Go 网关；先用 <code>create_app</code> 单体</li>
+          <li><strong>最后换运维</strong>：PostgreSQL → Redis / SQL，重做迁移、备份、健康检查</li>
+        </ol>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>检查项</th>
+                <th>标准</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Agent 调用</td><td>没有 <code>agent(...)</code>；只有 <code>reply</code> / <code>reply_stream</code></td></tr>
+              <tr><td>工具 schema</td><td>由 Python 签名 / docstring 生成，描述清楚</td></tr>
+              <tr><td>状态</td><td>会话可恢复；多副本共享存储</td></tr>
+              <tr><td>服务</td><td>鉴权已替换；下载密钥共享；调度 / 渠道单例</td></tr>
+              <tr><td>观测</td><td><code>TracingMiddleware</code> 接 OTLP；token 可统计</td></tr>
+              <tr><td>测试</td><td>假模型单测 + 真实模型夜间冒烟</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          两边对照阅读时，建议「Java 02–10 打基础，Python 02–14 打基础；
+          Java 19–26 看服务与运维，Python 15–26 看服务与综合案例」。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

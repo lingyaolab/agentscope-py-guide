@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 API 速查：Agent、ChatModel、Toolkit、消息与事件、中间件、create_app、Workspace、RAG、Realtime、TTS/ASR、A2AAgent 的常用签名与默认值。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="C API 速查表 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="常用类、方法、默认值与源码行号，按模块分组。" />
+    <title>C API 速查表 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="appendix-api-cheatsheet" data-root="..">
+    <main>
+      <article class="article">
+        <h1>C · API 速查表</h1>
+        <p class="lede">
+          只列最常用的入口与默认值。完整签名以源码为准，
+          行号是 2.0.11 的定位，升级后可能漂移。
+        </p>
+
+        <h2 id="agent">Agent</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>成员</th>
+                <th>签名 / 说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>Agent(...)</code><span class="src" data-src="src/agentscope/agent/_agent.py:121">_agent.py:121</span></td>
+                <td><code>name, system_prompt, model, toolkit=None, middlewares=None, state=None, offloader=None, model_config=None, context_config=None, react_config=None, injection_config=None</code></td>
+              </tr>
+              <tr>
+                <td><code>reply_stream(inputs, structured_schema=None, yield_final_msg=False)</code><span class="src" data-src="src/agentscope/agent/_agent.py:289">_agent.py:289</span></td>
+                <td>产出 <code>AgentEvent</code>；可选最后产出 <code>Msg</code></td>
+              </tr>
+              <tr>
+                <td><code>reply(inputs, structured_schema=None)</code><span class="src" data-src="src/agentscope/agent/_agent.py:333">_agent.py:333</span></td>
+                <td>消费完整流，返回最终 <code>Msg</code></td>
+              </tr>
+              <tr>
+                <td><code>observe(msgs)</code><span class="src" data-src="src/agentscope/agent/_agent.py:382">_agent.py:382</span></td>
+                <td>把消息写入上下文，不触发回复</td>
+              </tr>
+              <tr>
+                <td><code>compress_context()</code><span class="src" data-src="src/agentscope/agent/_agent.py:387">_agent.py:387</span></td>
+                <td>按配置压缩上下文</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          打断 / 恢复通过输入事件完成：<code>UserInterruptEvent</code>、
+          <code>UserConfirmResultEvent</code>、<code>ExternalExecutionResultEvent</code>。
+        </p>
+
+        <h2 id="model">模型与凭证</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>成员</th>
+                <th>签名 / 默认值</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>ChatModelBase(...)</code><span class="src" data-src="src/agentscope/model/_base.py:62">_base.py:62</span></td>
+                <td><code>credential, model, parameters, stream=True, max_retries=3, retry_delay=1.0, context_size=32768</code></td>
+              </tr>
+              <tr>
+                <td><code>await model(messages, tools=None, tool_choice=None)</code><span class="src" data-src="src/agentscope/model/_base.py:184">_base.py:184</span></td>
+                <td>返回 <code>ChatResponse</code> 或异步生成器；内部含重试</td>
+              </tr>
+              <tr>
+                <td><code>await model.count_tokens(messages, tools)</code><span class="src" data-src="src/agentscope/model/_base.py:379">_base.py:379</span></td>
+                <td>默认按字节 / 4 估算，只用于上下文判断</td>
+              </tr>
+              <tr>
+                <td><code>client_kwargs</code></td>
+                <td>OpenAI / DashScope 模型透传给 SDK，可设 <code>timeout</code> 与 <code>max_retries</code></td>
+              </tr>
+              <tr>
+                <td><code>ModelConfig(max_retries=0, fallback_model=None)</code></td>
+                <td>Agent 层重试与降级；默认 0，避免与模型层叠加</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          凭证类提供 <code>list_models()</code>、<code>list_tts_models()</code>、
+          <code>list_asr_models()</code> 等发现方法，前端据此渲染模型选择器。
+        </p>
+
+        <h2 id="tool">工具与 Toolkit</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>成员</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>Toolkit(tools=None, skills_or_loaders=None, mcps=None, tool_groups=None)</code><span class="src" data-src="src/agentscope/tool/_toolkit.py:88">_toolkit.py:88</span></td>
+                <td>工具、技能、MCP、工具组的统一注册处</td>
+              </tr>
+              <tr>
+                <td><code>await toolkit.get_tool_schemas()</code><span class="src" data-src="src/agentscope/tool/_toolkit.py:171">_toolkit.py:171</span></td>
+                <td>返回给模型的工具 schema 列表</td>
+              </tr>
+              <tr>
+                <td><code>await toolkit.call_tool(tool_call)</code><span class="src" data-src="src/agentscope/tool/_toolkit.py:225">_toolkit.py:225</span></td>
+                <td>执行一次工具调用</td>
+              </tr>
+              <tr>
+                <td><code>await toolkit.add_tool(tool)</code><span class="src" data-src="src/agentscope/tool/_toolkit.py:640">_toolkit.py:640</span></td>
+                <td>运行时添加工具</td>
+              </tr>
+              <tr>
+                <td><code>FunctionTool(func, name=None, description=None, input_schema=None, permission=None, is_read_only=False)</code></td>
+                <td>把普通函数变成工具；schema 来自签名与 docstring</td>
+              </tr>
+              <tr>
+                <td><code>ToolBase</code></td>
+                <td>自定义工具基类：<code>name</code>、<code>description</code>、<code>input_schema</code>、<code>__call__</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="message">消息与事件</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>类型</th>
+                <th>用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>Msg(name, content, role)</code></td><td>通用消息；content 是块列表</td></tr>
+              <tr><td><code>UserMsg</code> / <code>AssistantMsg</code> / <code>SystemMsg</code></td><td>按 role 创建消息的工厂</td></tr>
+              <tr><td><code>TextBlock</code> / <code>ThinkingBlock</code> / <code>HintBlock</code></td><td>文本 / 思考 / 提示</td></tr>
+              <tr><td><code>ToolCallBlock</code> / <code>ToolResultBlock</code></td><td>工具调用与结果；含 <code>state</code></td></tr>
+              <tr><td><code>DataBlock</code></td><td>图片、音频、文件；source 为 base64 或 URL</td></tr>
+              <tr><td><code>ReplyStartEvent</code> / <code>ReplyEndEvent</code></td><td>一次回复的起止；带 <code>reply_id</code></td></tr>
+              <tr><td><code>ModelCallStartEvent</code> / <code>ModelCallEndEvent</code></td><td>模型调用与 token</td></tr>
+              <tr><td><code>ToolCallStartEvent</code> / <code>ToolResultEndEvent</code></td><td>工具调用与最终状态</td></tr>
+              <tr><td><code>RequireUserConfirmEvent</code></td><td>等待人工确认</td></tr>
+              <tr><td><code>UserConfirmResultEvent</code> / <code>UserInterruptEvent</code></td><td>确认结果 / 打断</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <code>Msg.get_text_content()</code> 拼接所有文本块；
+          <code>Msg.append_event(event)</code> 从事件流组装消息。
+        </p>
+
+        <h2 id="middleware">中间件</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Hook</th>
+                <th>包裹什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>on_reply</code><span class="src" data-src="src/agentscope/middleware/_base.py:68">_base.py:68</span></td><td>整次 reply，含所有 ReAct 轮次</td></tr>
+              <tr><td><code>on_reasoning</code><span class="src" data-src="src/agentscope/middleware/_base.py:101">_base.py:101</span></td><td>一轮推理</td></tr>
+              <tr><td><code>on_acting</code><span class="src" data-src="src/agentscope/middleware/_base.py:124">_base.py:124</span></td><td>一次工具执行</td></tr>
+              <tr><td><code>on_model_call</code><span class="src" data-src="src/agentscope/middleware/_base.py:213">_base.py:213</span></td><td>一次底层模型调用</td></tr>
+              <tr><td><code>on_check_permission</code><span class="src" data-src="src/agentscope/middleware/_base.py:170">_base.py:170</span></td><td>权限判定前后</td></tr>
+              <tr><td><code>on_compress_context</code><span class="src" data-src="src/agentscope/middleware/_base.py:241">_base.py:241</span></td><td>上下文压缩判定</td></tr>
+              <tr><td><code>on_system_prompt</code><span class="src" data-src="src/agentscope/middleware/_base.py:264">_base.py:264</span></td><td>系统提示变换（串行）</td></tr>
+              <tr><td><code>list_tools</code><span class="src" data-src="src/agentscope/middleware/_base.py:286">_base.py:286</span></td><td>可选的工具来源，不自动调用</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          内置：<code>TracingMiddleware</code>、<code>ReplyBudgetControlMiddleware</code>、
+          <code>TTSMiddleware</code>、<code>ModelRouterMiddleware</code>、
+          <code>RAGMiddleware</code>、<code>AgenticMemoryMiddleware</code>、
+          <code>Mem0Middleware</code>、<code>ReMeMiddleware</code>。
+        </p>
+
+        <h2 id="service">Agent Service</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>入口</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>create_app(storage, message_bus, workspace_manager, ...)</code><span class="src" data-src="src/agentscope/app/_app.py:113">_app.py:113</span></td>
+                <td>返回 FastAPI app；必填存储、总线、工作区</td>
+              </tr>
+              <tr><td><code>knowledge_base_manager</code></td><td>可选；启用知识库端点与 RAG</td></tr>
+              <tr><td><code>mcp_hubs</code> / <code>skill_hubs</code></td><td>可选；MCP / 技能中心</td></tr>
+              <tr><td><code>resource_access_policy</code></td><td>可选；默认 <code>DenyAllResourceAccessPolicy</code></td></tr>
+              <tr><td><code>extra_agent_middlewares</code></td><td>每回合工厂 <code>(user_id, agent_id, session_id[, workspace])</code></td></tr>
+              <tr><td><code>extra_agent_tools</code></td><td>每回合工具工厂 <code>(user_id, agent_id, session_id)</code></td></tr>
+              <tr><td><code>download_secret</code></td><td>多副本必须共享</td></tr>
+              <tr><td><code>enable_scheduler</code> / <code>enable_channel_worker</code></td><td>只在一个进程为 <code>True</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          常用端点：<code>POST /chat</code>、<code>GET /sessions/{id}/stream</code>、
+          <code>POST /sessions/{id}/interrupt</code>、<code>GET /health</code>、
+          <code>POST /realtime/sessions/{id}/offer</code>。
+        </p>
+
+        <h2 id="workspace-rag">Workspace / RAG / 语音</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>成员</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>WorkspaceBase</code><span class="src" data-src="src/agentscope/workspace/_base.py:225">_base.py:225</span></td><td><code>initialize</code> / <code>close</code> / <code>reset</code> / <code>get_backend</code> / <code>workdir</code></td></tr>
+              <tr><td><code>KnowledgeBase.search(queries, top_k=5, score_threshold=None)</code></td><td>返回去重、降序的 <code>VectorSearchResult</code></td></tr>
+              <tr><td><code>RealtimeAgent(name, system_prompt, model, toolkit=None, vad=None, aggregator=None)</code><span class="src" data-src="src/agentscope/agent/_realtime/_agent.py:133">_agent.py:133</span></td><td>端到端语音；<code>reply_stream(transport)</code> / <code>send</code> / <code>interrupt</code></td></tr>
+              <tr><td><code>LocalAudioTransport(input_sample_rate, output_sample_rate, ...)</code></td><td>本地声卡；采样率取模型属性</td></tr>
+              <tr><td><code>TTSModelBase.synthesize(text)</code><span class="src" data-src="src/agentscope/tts/_tts_base.py:187">_tts_base.py:187</span></td><td>标准或流式音频</td></tr>
+              <tr><td><code>TTSModelBase.push(text)</code><span class="src" data-src="src/agentscope/tts/_tts_base.py:112">_tts_base.py:112</span></td><td>增量输入，返回当前可用音频</td></tr>
+              <tr><td><code>ASRModelBase.transcribe(audio, filename)</code><span class="src" data-src="src/agentscope/asr/_asr_base.py:209">_asr_base.py:209</span></td><td>批量转写或实时收尾</td></tr>
+              <tr><td><code>A2AAgent.reply_stream(inputs)</code><span class="src" data-src="src/agentscope/agent/_a2a_agent.py:283">_a2a_agent.py:283</span></td><td>远端 Agent 的事件流；<code>context_id</code> 自动续接</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="defaults">常用默认值</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>项</th>
+                <th>默认值</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>ChatModelBase.max_retries</code></td><td>3</td></tr>
+              <tr><td><code>ChatModelBase.retry_delay</code></td><td>1.0 秒（固定，无抖动）</td></tr>
+              <tr><td><code>ModelConfig.max_retries</code></td><td>0</td></tr>
+              <tr><td><code>ReActConfig.max_iters</code></td><td>50</td></tr>
+              <tr><td><code>ContextConfig.trigger_ratio</code></td><td>0.8</td></tr>
+              <tr><td><code>ToolOffloadMiddleware.timeout_secs</code></td><td>10</td></tr>
+              <tr><td>会话锁租约</td><td>600 秒，心跳续期</td></tr>
+              <tr><td><code>TurnAggregator.merge_window_ms</code></td><td>800</td></tr>
+              <tr><td><code>LocalAudioTransport</code> 采样率</td><td>输入 16000 / 输出 24000（实际取模型属性）</td></tr>
+              <tr><td>实时确认超时</td><td>300 秒</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          默认值不是推荐值。生产里通常要降低 <code>max_iters</code>，
+          关掉多余的重试层，并把预算与超时显式配置。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>

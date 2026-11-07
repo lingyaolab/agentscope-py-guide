@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 1.x 到 2.0.11 迁移：Agent 从 __call__ 到 reply_stream、消息块重组、ToolBase 与 Toolkit、credential 与 formatter 分离、Agent Service、memory 模块移除、迁移顺序与检查清单。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="D 版本迁移：1.x → 2.0 的破坏性变更 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="按模块汇总 1.x 到 2.0 的破坏性变化、迁移顺序与检查清单。" />
+    <title>D 版本迁移：1.x → 2.0 的破坏性变更 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="appendix-migration" data-root="..">
+    <main>
+      <article class="article">
+        <h1>D · 版本迁移</h1>
+        <p class="lede">
+          AgentScope 2.0 是破坏性更新，不是改几个 import 就能升级。
+          这一页按模块列出变化，并给出一条可执行的迁移顺序。
+        </p>
+
+        <h2 id="breaking">2.0 是一次破坏性更新</h2>
+        <p>
+          官方 change-log 的定位很明确：Agent、消息、工具、模型、状态、服务都重写过。
+          迁移时不要「边跑边修」，先列清单，再逐层替换。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>模块</th>
+                <th>1.x</th>
+                <th>2.0</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Agent</td><td><code>ReActAgent</code> + <code>__call__</code></td><td><code>Agent</code> + <code>reply</code> / <code>reply_stream</code></td></tr>
+              <tr><td>扩展点</td><td>hook 机制</td><td>中间件系统</td></tr>
+              <tr><td>状态</td><td><code>state_dict</code> / <code>load_state_dict</code></td><td><code>AgentState</code></td></tr>
+              <tr><td>追踪</td><td>Agent 内部 OTel</td><td><code>TracingMiddleware</code></td></tr>
+              <tr><td>消息</td><td>Image / Audio / Video 块</td><td>统一 <code>DataBlock</code></td></tr>
+              <tr><td>工具</td><td>各自注册</td><td><code>ToolBase</code> + <code>Toolkit</code></td></tr>
+              <tr><td>模型</td><td>凭证与模型耦合</td><td><code>Credential</code> 分离 + <code>ModelCard</code></td></tr>
+              <tr><td>服务</td><td>无内建服务</td><td><code>app.create_app</code>（FastAPI）</td></tr>
+              <tr><td>记忆</td><td><code>memory</code> 模块</td><td>移除，改为 RAG / 长期记忆中间件</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="agent">Agent：从 __call__ 到 reply_stream</h2>
+        <p>
+          1.x 通过 <code>agent(...)</code> 触发；2.0 改成两个公共方法：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>方法</th>
+                <th>返回</th>
+                <th>用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>reply_stream(...)</code><span class="src" data-src="src/agentscope/agent/_agent.py:289">_agent.py:289</span></td><td>异步事件流</td><td>前端实时渲染、可观测、HITL</td></tr>
+              <tr><td><code>reply(...)</code><span class="src" data-src="src/agentscope/agent/_agent.py:333">_agent.py:333</span></td><td><code>Msg</code></td><td>只要最终答案</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <pre><code>from agentscope.agent import Agent
+from agentscope.message import UserMsg
+
+
+async def ask(agent: Agent) -&gt; str | None:
+    msg = await agent.reply(
+        UserMsg(name="user", content="你好"),
+    )
+    return msg.get_text_content()</code></pre>
+        <p>
+          同时被移除或替换的：<code>state_dict</code> / <code>load_state_dict</code>、
+          Agent 的 <code>print</code> 接口、Agent 内部 OTel。状态改由
+          <code>AgentState</code> 显式管理，追踪交给中间件。
+        </p>
+        <div class="callout warn">
+          <span class="ct">不要再用 hook 思维</span>
+          <p>
+            旧 hook 的「前后切一刀」在 2.0 由 <code>MiddlewareBase</code> 承担。
+            但中间件是洋葱模型，能改事件流、能拦工具，不只是日志。
+          </p>
+        </div>
+
+        <h2 id="message">Message：内容块重组</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>1.x</th>
+                <th>2.0</th>
+                <th>迁移动作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>ImageBlock</code> / <code>AudioBlock</code> / <code>VideoBlock</code></td>
+                <td><code>DataBlock</code> + <code>media_type</code></td>
+                <td>按媒体类型构造 <code>DataBlock</code>，不要找旧类名</td>
+              </tr>
+              <tr>
+                <td><code>ToolUseBlock</code></td>
+                <td><code>ToolCallBlock</code></td>
+                <td>全局替换类名；新增 <code>state</code> 与 <code>suggested_rules</code></td>
+              </tr>
+              <tr>
+                <td>普通文本块</td>
+                <td><code>TextBlock</code></td>
+                <td>内容校验更严格</td>
+              </tr>
+              <tr>
+                <td>无 hint 块</td>
+                <td><code>HintBlock</code></td>
+                <td>运行时引导改用 HintBlock</td>
+              </tr>
+              <tr>
+                <td>无统一 id</td>
+                <td>所有 block 带 <code>id</code></td>
+                <td>事件与消息可以稳定关联</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <code>Msg</code> 也重写了：Pydantic 校验、<code>created_at</code> /
+          <code>finished_at</code> / <code>usage</code>、<code>append_event</code>，
+          以及 <code>UserMsg</code> / <code>AssistantMsg</code> / <code>SystemMsg</code> 工厂。
+        </p>
+        <pre><code>from agentscope.message import TextBlock, UserMsg
+
+msg = UserMsg(
+    name="user",
+    content=[TextBlock(text="你好")],
+)
+print(msg.get_text_content())</code></pre>
+
+        <h2 id="tool">工具：ToolBase 与 Toolkit</h2>
+        <p>
+          2.0 把工具、技能、MCP、工具组统一进 <code>Toolkit</code>：
+        </p>
+        <ul>
+          <li><code>ToolBase</code> 是所有工具的基类</li>
+          <li><code>FunctionTool</code> 把普通函数变成工具</li>
+          <li><code>MCPTool</code> 包装 MCP 工具</li>
+          <li><code>ToolGroup</code> 支持按需激活，<code>basic</code> 组常驻</li>
+          <li><code>ResetTools</code> 是运行时切换工具组的元工具</li>
+        </ul>
+        <pre><code>from agentscope.tool import FunctionTool, Toolkit
+
+
+def get_weather(city: str) -&gt; str:
+    """查询城市天气。"""
+    return f"{city}: sunny"
+
+
+toolkit = Toolkit(tools=[FunctionTool(get_weather)])</code></pre>
+        <p>
+          旧代码里「自己维护工具 schema」的部分可以删掉：签名、类型、docstring
+          现在直接生成 schema。但这也意味着 docstring 的质量直接影响模型行为。
+        </p>
+
+        <h2 id="model">模型：credential 与 formatter 分离</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>变化</th>
+                <th>影响</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>凭证从模型类解耦</td><td>一个凭证可被多个模型 / 会话复用；服务层可做共享</td></tr>
+              <tr><td>formatter 集成进 chat model</td><td>每种 provider 有默认 formatter；假模型也要设置</td></tr>
+              <tr><td>新增 <code>ModelCard</code> 与 <code>list_models()</code></td><td>前端可发现模型能力与参数 schema</td></tr>
+              <tr><td>新增 Kimi / Moonshot / DeepSeek / XAI / OpenAI Response</td><td>迁移时按 provider 选类，不要再用旧 wrapper</td></tr>
+              <tr><td>废弃 <code>Trinity</code> wrapper</td><td>多模型路由改用 <code>ModelRouterMiddleware</code> 或 fallback</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          迁移时先把「key 从代码里拿出来」，放进 <code>CredentialBase</code> 子类；
+          再把模型的 <code>formatter</code> 交给默认实现，不要手工拼 provider 请求。
+        </p>
+
+        <h2 id="service">新增 Agent Service</h2>
+        <p>
+          1.x 没有内建 HTTP 服务。2.0 新增 <code>app</code> 模块：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>组件</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>create_app</code></td><td>FastAPI 工厂，统一暴露 agent / chat / session / schedule / workspace 等路由</td></tr>
+              <tr><td><code>StorageBase</code></td><td>Redis 或 SQLAlchemy 持久化</td></tr>
+              <tr><td><code>MessageBus</code></td><td>会话锁、回放、收件箱、唤醒</td></tr>
+              <tr><td><code>WorkspaceManager</code></td><td>多租户工作区生命周期</td></tr>
+              <tr><td><code>ChatRunRegistry</code></td><td>同一会话只允许一个在途 run</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          迁移顺序是「先让 SDK 跑通，再上服务」。不要一上来就把旧业务塞进
+          <code>create_app</code>，否则分不清是 SDK 还是服务层的问题。
+        </p>
+
+        <h2 id="memory">memory 模块移除</h2>
+        <p>
+          2.0 废弃了 1.x 的 <code>memory</code> 模块，原因是它与 Agent 逻辑耦合过深。
+          替代方案：
+        </p>
+        <ul>
+          <li>短期上下文：<code>AgentState.context</code> + <code>ContextConfig</code></li>
+          <li>长期记忆：<code>AgenticMemoryMiddleware</code>、<code>Mem0Middleware</code>、<code>ReMeMiddleware</code></li>
+          <li>可检索事实：知识库 + <code>RAGMiddleware</code></li>
+          <li>超大内容：<code>Offloader</code> + 工作区</li>
+        </ul>
+        <div class="callout warn">
+          <span class="ct">别把 memory 直接映射成知识库</span>
+          <p>
+            记忆是「跨会话的用户事实」，知识库是「可检索的共享文档」。
+            混在一起会导致上下文膨胀、共享边界混乱。
+          </p>
+        </div>
+
+        <h2 id="order">迁移顺序</h2>
+        <ol>
+          <li><strong>锁版本</strong>：先固定 <code>agentscope==2.0.11</code>，建一个分支</li>
+          <li><strong>换依赖</strong>：模型扩展、可选 extras（a2a / realtime / sql / vdb）按需安装</li>
+          <li><strong>换消息</strong>：ToolUse → ToolCall，Image/Audio/Video → DataBlock，补 block id</li>
+          <li><strong>换 Agent</strong>：<code>__call__</code> → <code>reply</code> / <code>reply_stream</code>，状态改 <code>AgentState</code></li>
+          <li><strong>换工具</strong>：注册到 <code>Toolkit</code>，用 <code>ToolBase</code> / <code>FunctionTool</code></li>
+          <li><strong>换模型</strong>：拆 credential，设置 formatter，补 ModelCard</li>
+          <li><strong>换扩展</strong>：hook → 中间件，内部 OTel → <code>TracingMiddleware</code></li>
+          <li><strong>上服务</strong>：最后才接 <code>create_app</code>，先单进程再水平扩展</li>
+          <li><strong>补测试</strong>：假模型 + 事件断言 + 黄金样本，再跑真实模型冒烟</li>
+        </ol>
+
+        <h2 id="checklist">迁移检查清单</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>检查项</th>
+                <th>通过标准</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Agent 调用</td><td>不再出现 <code>agent(...)</code>；只有 <code>reply</code> / <code>reply_stream</code></td></tr>
+              <tr><td>状态</td><td>不再用 <code>state_dict</code>；状态可序列化 / 恢复</td></tr>
+              <tr><td>消息块</td><td>没有 <code>ToolUseBlock</code> / <code>ImageBlock</code> 等旧类名</td></tr>
+              <tr><td>工具 schema</td><td>由 <code>ToolBase</code> / <code>FunctionTool</code> 生成，且有 docstring</td></tr>
+              <tr><td>凭证</td><td>key 不在代码与镜像里；可被多个模型复用</td></tr>
+              <tr><td>追踪</td><td>使用 <code>TracingMiddleware</code>，不再依赖 Agent 内部 OTel</td></tr>
+              <tr><td>记忆</td><td>不再 import <code>agentscope.memory</code></td></tr>
+              <tr><td>服务</td><td>单进程能跑通，再多副本；scheduler / channel 单例</td></tr>
+              <tr><td>测试</td><td>假模型测试不访问网络；真实模型只跑夜间 / 发布前</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
