@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="00A 信息流实验室：用可播放的分步演示看清 AgentScope Python 2.0.11 里一条 UserMsg 从 Agent.reply_stream、上下文拼接、模型推理、权限、工具、AgentState 到事件流的每一步输入输出，并扩展到 Agent Service 与生产化外围。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="00A 信息流实验室：一条消息怎么走完 Agent · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="可播放的分步演示：从最小 reply 到 Agent Service，再到生产化外围。" />
+    <title>00A 信息流实验室：一条消息怎么走完 Agent · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+    <link rel="stylesheet" href="../assets/flow-demo.css" />
+  </head>
+  <body data-page="00a-agent-flow" data-root="..">
+    <main>
+      <article class="article">
+        <h1>00A · 信息流实验室</h1>
+        <p class="lede">
+          读代码最容易断片的地方，是「这一步的输出到底交给了谁」。
+          这一页把 AgentScope 的一次调用拆成可播放的节点：
+          从一条 <code>UserMsg</code> 进入，到模型、工具、状态、事件，再到 Agent Service 与生产化外围。
+        </p>
+
+        <h2 id="goals">这一页怎么用</h2>
+        <ul class="goals">
+          <li>用 L1 最小场景看清 9 个基础节点，以及每个节点吐出什么</li>
+          <li>用 L2 服务化场景看新增的 5 个节点：Session、Workspace、Middleware、Offloader、SSE</li>
+          <li>用 L3 生产化场景看再加的 8 个外围节点，以及它们接在触发层还是循环里</li>
+          <li>用「上一节 / 下一节 / 播放」把信息流走一遍，而不是只看静态图</li>
+          <li>每一步都能点回对应章节与源码入口</li>
+        </ul>
+
+        <h2 id="demo">信息流实验室</h2>
+        <div class="fd" id="fd">
+          <div class="fd-top">
+            <div class="fd-brand"><span class="fd-pulse" aria-hidden="true"></span><span>AGENT TRACE</span><span class="fd-level" id="fd-level">L1</span></div>
+            <div class="fd-modes" role="group" aria-label="选择演示场景">
+              <button type="button" class="fd-mode" data-scenario="minimal" aria-pressed="true">L1 最小</button>
+              <button type="button" class="fd-mode" data-scenario="service" aria-pressed="false">L2 服务化</button>
+              <button type="button" class="fd-mode" data-scenario="production" aria-pressed="false">L3 生产化</button>
+            </div>
+            <div class="fd-controls">
+              <button type="button" id="fd-prev">← 上一节</button>
+              <button type="button" id="fd-play" aria-pressed="false">▶ 播放</button>
+              <button type="button" id="fd-next">下一节 →</button>
+              <button type="button" id="fd-reset">重置</button>
+            </div>
+          </div>
+
+          <p class="fd-blurb" id="fd-blurb"></p>
+
+          <div class="fd-grid">
+            <div class="fd-canvas">
+              <div class="fd-canvas-head">
+                <span id="fd-scenario-label">MINIMAL REPLY</span>
+                <span class="fd-counter" id="fd-counter">01 / 09</span>
+              </div>
+              <div class="fd-rail-wrap">
+                <div class="fd-track-line" aria-hidden="true"></div>
+                <div class="fd-rail" id="fd-rail" aria-label="信息流节点"></div>
+                <span class="fd-packet" id="fd-packet" aria-hidden="true"></span>
+              </div>
+              <div class="fd-timeline" aria-hidden="true"><i id="fd-bar"></i></div>
+            </div>
+
+            <aside class="fd-panel" aria-live="polite">
+              <div class="fd-step" id="fd-step"></div>
+              <div class="fd-title" id="fd-title" role="status"></div>
+              <dl class="fd-detail">
+                <dt>输入</dt><dd id="fd-input"></dd>
+                <dt>输出</dt><dd id="fd-output"></dd>
+                <dt>交给谁</dt><dd id="fd-next-node"></dd>
+              </dl>
+              <div class="fd-json-wrap">
+                <div class="fd-json-head">payload.json <span>live</span></div>
+                <pre class="fd-json" id="fd-json" data-no-copy></pre>
+              </div>
+              <div class="fd-events" id="fd-events" aria-label="事件轨迹"></div>
+              <p class="fd-link" id="fd-link"></p>
+            </aside>
+          </div>
+        </div>
+        <p class="footnote">
+          节点按执行顺序排成网格；播放会每 1.4 秒前进一格，到末尾自动停止。
+          在 <code>prefers-reduced-motion</code> 下，高亮仍会切换，但不会平滑滚动或扫光。
+        </p>
+        <div class="callout tip">
+          <span class="ct">三档是叠加关系，不是三条独立链路</span>
+          <p>
+            <strong>L1 基础 9 个节点</strong> → <strong>L2 保留 L1 再加 5 个（共 14）</strong> →
+            <strong>L3 保留 L2 再加 8 个（共 22）</strong>。
+            节点右上角的 <code>+L2</code> / <code>+L3</code> 就是本层新增的那一批。
+          </p>
+        </div>
+
+        <h2 id="minimal">最小链路：一条 reply 的 9 个节点</h2>
+        <p>
+          L1 只有 9 个节点：消息进来，拼上下文，模型决定「说话还是调工具」，
+          工具结果回填后再让模型收尾。这条链路里没有 Agent Service、工作区、SSE。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>节点</th><th>它做什么</th><th>输出给谁</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>UserMsg</code></td><td>用户输入的统一消息结构</td><td><code>Agent.reply_stream</code></td></tr>
+              <tr><td><code>Agent</code></td><td>创建 reply、组装本轮输入</td><td>中间件 / 上下文</td></tr>
+              <tr><td><code>Context</code></td><td>拼历史、system prompt、工具 schema</td><td><code>ChatModel</code></td></tr>
+              <tr><td><code>ChatModel</code></td><td>第一次推理，可能产出工具调用</td><td><code>PermissionEngine</code></td></tr>
+              <tr><td><code>Permission</code></td><td>决定工具调用是放行、询问还是拒绝</td><td><code>Toolkit</code> / HITL</td></tr>
+              <tr><td><code>Toolkit</code></td><td>执行工具，产出 <code>ToolResultBlock</code></td><td>下一轮上下文</td></tr>
+              <tr><td><code>ChatModel 2</code></td><td>带着工具结果再次推理</td><td><code>AgentState</code></td></tr>
+              <tr><td><code>AgentState</code></td><td>保存上下文、reply id、usage</td><td>事件流 / 调用方</td></tr>
+              <tr><td><code>Output</code></td><td>最终 <code>Msg</code> 与事件流</td><td>业务代码或前端</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="service">服务化：加的 5 个节点</h2>
+        <p>
+          L2 不是另起一条链路：它在 L1 的 9 个节点上新增 5 个，共 14 个。
+          新增的是 <strong>Session、Workspace、Middleware、Offloader、SSE</strong>。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>L2 的层</th><th>插在哪</th><th>它改变什么</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Session <span class="tag">+L2</span></td><td>进入 Agent 之前</td><td>user_id / agent_id / session_id、权限上下文与持久化</td></tr>
+              <tr><td>Workspace <span class="tag">+L2</span></td><td>Agent 组装时</td><td>文件、MCP、技能、卸载内容进入工具面</td></tr>
+              <tr><td>Middleware <span class="tag">+L2</span></td><td>模型与工具前后</td><td>追踪、预算、记忆、RAG、动态提示</td></tr>
+              <tr><td>Offloader <span class="tag">+L2</span></td><td>上下文变长时</td><td>压缩历史或把大结果挪到工作区</td></tr>
+              <tr><td>SSE <span class="tag">+L2</span></td><td>Agent 之外</td><td>事件扇出、回放、重连</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="production">生产化：再加 8 个外围节点</h2>
+        <p>
+          L3 在 L2 的 14 个节点上再加 8 个，共 22 个：
+          Auth、Gateway、Scheduler、Channel、Hubs、Sharing、Realtime、A2A。
+          注意它们不是都塞进 ReAct 循环：Auth / Gateway 在入口，Scheduler 在触发层，
+          Hubs 在资源层，Realtime / A2A 是旁路或对端。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>外围设施</th><th>接在哪</th><th>对信息流的影响</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Auth</td><td>入站之前</td><td>把请求变成可信 <code>user_id</code></td></tr>
+              <tr><td>Gateway / 限流</td><td>入站之后</td><td>路由到会话、排队、配额检查</td></tr>
+              <tr><td>Scheduler</td><td>触发层</td><td>没有人类消息，也能按时间造一次调用</td></tr>
+              <tr><td>Channel</td><td>入站</td><td>把 IM 事件转成 <code>Msg</code> 与回复目标</td></tr>
+              <tr><td>Hubs</td><td>资源层</td><td>用户安装 MCP / 技能，再装配到工作区</td></tr>
+              <tr><td>Sharing</td><td>资源解析</td><td>跨用户凭证 / Agent / 知识库可见性</td></tr>
+              <tr><td>Realtime</td><td>旁路</td><td>音频进出模型，事件流仍走 Agent</td></tr>
+              <tr><td>A2A</td><td>对端</td><td>把远端 Agent 的事件流翻译成本地事件</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="truth">每一步的出处</h2>
+        <p>
+          这张实验室不是另写一套流程，而是把正文里的调用链压缩成节点。
+          入口与契约可以按下面几处回查：
+        </p>
+        <ul class="goals">
+          <li><code>Agent.reply_stream</code> 的公共入口：<span class="src" data-src="src/agentscope/agent/_agent.py:289">_agent.py:289</span></li>
+          <li>内部主循环 <code>_reply</code>：<span class="src" data-src="src/agentscope/agent/_agent.py:901">_agent.py:901</span></li>
+          <li>模型调用与重试：<span class="src" data-src="src/agentscope/agent/_agent.py:3291">_agent.py:3291</span></li>
+          <li>工具权限判定：<span class="src" data-src="src/agentscope/agent/_agent.py:2340">_agent.py:2340</span></li>
+          <li>工具执行入口：<span class="src" data-src="src/agentscope/tool/_toolkit.py:225">_toolkit.py:225</span></li>
+          <li>状态结构：<span class="src" data-src="src/agentscope/state/_state.py:209">_state.py:209</span></li>
+          <li>服务层中间件注入：<span class="src" data-src="src/agentscope/app/_service/_chat.py:984">_chat.py:984</span> 与 <span class="src" data-src="src/agentscope/app/_service/_chat.py:1015">_chat.py:1015</span></li>
+        </ul>
+
+        <h2 id="next">继续读什么</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>接着看什么</th><th>为什么是它</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><a href="02-first-agent.html">02 第一个 Agent</a></td><td>最小链路真正跑起来</td></tr>
+              <tr><td><a href="03-message-event.html">03 消息与事件</a></td><td>每个节点为什么吐 Msg / Event</td></tr>
+              <tr><td><a href="05-tool.html">05 工具系统</a></td><td><code>ToolCallBlock</code> 到 <code>ToolResultBlock</code></td></tr>
+              <tr><td><a href="07-middleware.html">07 中间件</a></td><td>在哪一步能改写信息流</td></tr>
+              <tr><td><a href="15-agent-service.html">15 Agent Service</a></td><td>从单 Agent 到多租户服务</td></tr>
+              <tr><td><a href="23-production.html">23 生产化</a></td><td>把 L3 的外围设施接起来</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+    <script src="../assets/flow-demo.js"></script>
+  </body>
+</html>
