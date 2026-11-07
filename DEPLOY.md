@@ -103,7 +103,7 @@ node tools/check-sources.cjs        # 每条出处是否都能在 2.0.11 源码�
 2. `node tools/build-search-index.cjs`
 3. `node tools/check-site.cjs`、`node tools/check-sources.cjs`
 4. 在 `CHANGELOG.md` 记一笔（站点内首页「更新记录」同步）
-5. 提交并 push；如果启用了 Pages 分支部署，会自动更新
+5. 提交并 push；启用 Pages 后，在 Actions 里手动运行 **Deploy site**
 
 ## 9. 版本号约定
 
