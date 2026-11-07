@@ -94,6 +94,62 @@
           服务的价值就是把这些「外围」接管掉，让基于 <code>Agent</code> 的代码不用重写就能承接生产流量。
         </p>
 
+        <h2 id="quickstart">最小可跑：SQLite + 进程内总线</h2>
+        <p>
+          第一次跑不要直接上 Redis。单进程开发用
+          <code>AsyncSQLAlchemyStorage</code>
+          <span class="src" data-src="src/agentscope/app/storage/_sql/_storage.py:111">_storage.py:111</span>
+          配 SQLite，消息总线用
+          <code>InMemoryMessageBus</code>
+          <span class="src" data-src="src/agentscope/app/message_bus/_in_memory_message_bus.py:30">_in_memory_message_bus.py:30</span>，
+          十分钟就能验证「服务能启动、健康检查能过」。
+        </p>
+        <pre><code># service extra 提供 FastAPI / uvicorn，sql extra 提供 SQLAlchemy
+# uv pip install "agentscope[service,sql]==2.0.11" aiosqlite
+
+import uvicorn
+
+from agentscope.app import create_app
+from agentscope.app.message_bus import InMemoryMessageBus
+from agentscope.app.storage import AsyncSQLAlchemyStorage
+from agentscope.app.workspace_manager import LocalWorkspaceManager
+
+storage = AsyncSQLAlchemyStorage("sqlite+aiosqlite:///./agentscope.db")
+message_bus = InMemoryMessageBus()
+workspace_manager = LocalWorkspaceManager(
+    basedir="./workspaces",
+    ttl=3600.0,
+)
+
+app = create_app(
+    storage=storage,
+    message_bus=message_bus,
+    workspace_manager=workspace_manager,
+)
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8000)</code></pre>
+        <p>
+          启动后先验健康检查。注意 <code>/health</code>
+          <span class="src" data-src="src/agentscope/app/_router/_health.py:29">_health.py:29</span>
+          也走默认的身份依赖，不带 <code>X-User-ID</code> 会直接失败：
+        </p>
+        <pre><code>curl -H "X-User-ID: alice" http://127.0.0.1:8000/health</code></pre>
+        <p>
+          返回 <code>status: "ok"</code> 说明 storage、message bus、workspace manager
+          与 lifespan 里的服务都已就绪。再打开
+          <code>http://127.0.0.1:8000/docs</code> 看端点。
+        </p>
+        <div class="callout tip">
+          <span class="ct">什么时候换成 Redis</span>
+          <p>
+            单进程、本地开发用 SQLite + <code>InMemoryMessageBus</code> 足够；
+            一旦要多副本、跨进程唤醒或共享会话锁，就必须换成
+            <code>RedisStorage</code> + <code>RedisMessageBus</code>。
+            换的时候只改装配，不改业务代码。
+          </p>
+        </div>
+
         <h2 id="architecture">架构：六个部件</h2>
         <pre><code>Client / Frontend
       │  HTTP + SSE

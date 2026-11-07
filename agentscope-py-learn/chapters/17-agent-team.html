@@ -114,6 +114,47 @@
           Leader 通过读 Worker 的流、或等 Worker 用 <code>TeamSay</code> 回报来观察进展。
         </p>
 
+        <h2 id="quickstart">最小可跑：让 Leader 派一个 Worker</h2>
+        <p>
+          Team 不需要额外开关：只要会话不属于任何团队，它就会拿到 Leader 侧工具；
+          一旦成为 Worker，就只剩 <code>TeamSay</code>。所以最小实验就是
+          「建一个普通会话，然后让模型组队」。
+        </p>
+        <pre><code>POST /chat
+X-User-ID: alice
+{
+  "agent_id": "agent-xxx",
+  "session_id": "session-xxx",
+  "input": {
+    "name": "alice",
+    "role": "user",
+    "content": [{
+      "type": "text",
+      "text": "创建一个团队 atlas-team，派生一个 researcher，任务是查清 AgentScope 的 Team 工具各做什么，完成后用 TeamSay 汇报。"
+    }]
+  }
+}</code></pre>
+        <p>一次成功的运行会在 Leader 的事件流里看到这个顺序：</p>
+        <ol class="steps">
+          <li><span class="sh">TeamCreate</span><div>以当前会话为根建团队，Leader 身份写入 <code>TeamRecord</code>。</div></li>
+          <li><span class="sh">AgentCreate</span><div>派生 <code>researcher</code>，同时创建它的 Session，首任务立即开始执行。</div></li>
+          <li><span class="sh">Worker 运行</span><div>Worker 在自己的会话里跑 ReAct 循环；它的工具调用与文本事件走自己的 SSE 流。</div></li>
+          <li><span class="sh">TeamSay</span><div>Worker 把结果投递回 Leader 的收件箱，消息总线负责唤醒。</div></li>
+          <li><span class="sh">Leader 汇总</span><div>下一轮推理前，<code>InboxMiddleware</code> 把团队消息以 <code>HintBlock</code> 注入上下文。</div></li>
+        </ol>
+        <p>
+          验收点：<code>create_app</code> 不需要任何 <code>team=true</code> 配置；
+          Leader 的流里能看到两次工具调用，Worker 的 <code>session_id</code>
+          可以在 <code>TeamRecord</code> 或事件里找到，并且能单独订阅它的流。
+        </p>
+        <div class="callout warn">
+          <span class="ct">不要在 AgentCreate 后立刻重复任务</span>
+          <p>
+            Worker 创建后马上开始执行首任务。Leader 再发一条同样的 <code>TeamSay</code>
+            会让它做两遍；正确做法是等回报，或读它的会话流。
+          </p>
+        </div>
+
         <h2 id="tools">五个内置工具</h2>
         <p>Leader 会话自动获得这些工具；Worker 只看到 <code>TeamSay</code>。</p>
         <div class="table-wrap">

@@ -2,7 +2,7 @@
 
 这是学习站的源码仓库。站点本体在 [`agentscope-py-learn/`](agentscope-py-learn/)，可以直接当静态网站部署。
 
-**内容状态**：27 章正文（00–26）+ 00A 信息流实验室 + 附录 A–F 全部完成，对应站点版本 v0.28.0。
+**内容状态**：27 章正文（00–26）+ 00A 信息流实验室 + 附录 A–F 全部完成，对应站点版本 v0.30.0。
 
 - **本地看站**：双击 [`agentscope-py-learn/index.html`](agentscope-py-learn/index.html)，或在仓库根执行 `python -m http.server 8080` 后访问 <http://localhost:8080/agentscope-py-learn/>
 - **部署**：见 [DEPLOY.md](DEPLOY.md)（GitHub Pages / Vercel / Netlify / 自建服务器）

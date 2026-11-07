@@ -44,6 +44,55 @@
           <li>说清 Python 2.0.11 与 Java 2.0.4 在 Agent、服务、响应式与部署上的差异</li>
         </ul>
 
+        <h2 id="why">先说为什么：综合案例不是把所有能力都打开</h2>
+        <p>
+          这一章最容易犯的错，是把「能接」当成「该接」：语音、A2A、所有 IM 渠道、
+          团队共享一次全开，结果每加一层都多一份配置、成本与故障面。
+          Atlas 的顺序是<strong>先跑最小闭环，再按证据加层</strong>。
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>能力</th>
+                <th>什么时候才加</th>
+                <th>先加会怎样</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>知识库 / RAG</td>
+                <td>模型确实答不出内部事实</td>
+                <td>召回噪声掩盖提示词问题</td>
+              </tr>
+              <tr>
+                <td>长期记忆</td>
+                <td>用户明确要求「记住偏好」</td>
+                <td>把一次性上下文写进长期存储</td>
+              </tr>
+              <tr>
+                <td>团队共享</td>
+                <td>多个用户要复用同一凭证 / 知识库</td>
+                <td>权限边界没验证就放大影响面</td>
+              </tr>
+              <tr>
+                <td>IM 渠道</td>
+                <td>Web 端流程稳定之后</td>
+                <td>两套入口同时排障，定位困难</td>
+              </tr>
+              <tr>
+                <td>语音 / A2A</td>
+                <td>有明确的低延迟或跨组织需求</td>
+                <td>带宽、token 与信任成本先上来</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          所以下面的装配不是「一次贴完」，而是按里程碑推进：
+          最小闭环 → 知识与工具 → 共享与渠道 → 观测与评测。每一步都能独立验收。
+        </p>
+
         <h2 id="brief">案例：Atlas 团队知识助手</h2>
         <p>
           Atlas 的需求很普通，但几乎覆盖了所有生产问题：
@@ -111,6 +160,30 @@
             </tbody>
           </table>
         </div>
+
+        <h2 id="milestone">第一步：先跑最小闭环</h2>
+        <p>
+          不要从最后的 <code>app.py</code> 开始。先用 15 章的最小骨架跑通一条链路：
+        </p>
+        <pre><code>storage = AsyncSQLAlchemyStorage("sqlite+aiosqlite:///./atlas.db")
+message_bus = InMemoryMessageBus()
+workspace_manager = LocalWorkspaceManager(basedir="./workspaces")
+
+app = create_app(
+    storage=storage,
+    message_bus=message_bus,
+    workspace_manager=workspace_manager,
+)</code></pre>
+        <p>然后按顺序验收四件事，任何一步失败都不要往下加：</p>
+        <ol class="steps">
+          <li><span class="sh">凭证可用</span><div><code>GET /credential/schemas</code> 能列出 provider，<code>POST /credential</code> 能保存并脱敏返回。</div></li>
+          <li><span class="sh">Agent 可建</span><div><code>POST /agent</code> 返回 <code>agent_id</code>，系统提示与模型配置已写入。</div></li>
+          <li><span class="sh">会话可建</span><div><code>POST /sessions</code> 返回 <code>session_id</code>，绑定正确凭证与模型。</div></li>
+          <li><span class="sh">一问一答可流式</span><div><code>POST /chat</code> 返回 <code>started</code>，<code>GET /sessions/{id}/stream</code> 收到 <code>TEXT_BLOCK_DELTA</code> 与 <code>REPLY_END</code>。</div></li>
+        </ol>
+        <p>
+          这四步过了，再加知识库、工具、共享、渠道；每加一层都回到同一组验收。
+        </p>
 
         <h2 id="architecture">架构：一个进程里有什么</h2>
         <pre><code>Client / IM / Browser
