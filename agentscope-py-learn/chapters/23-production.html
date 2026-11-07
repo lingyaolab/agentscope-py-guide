@@ -1,0 +1,978 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 生产化：模型与 Agent 双层重试、HTTP 超时、工具卸载、并发限流、会话单飞、模型降级、优雅关闭、多进程拓扑、create_app 参数、健康检查、鉴权、存储迁移与 Docker 部署。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="23 生产化：超时、重试、限流与部署 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="双层重试、HTTP 与整体超时、工具卸载、并发限流、会话单飞、模型降级、优雅关闭、多进程拓扑、健康检查与 Docker。" />
+    <title>23 生产化：超时、重试、限流与部署 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="23-production" data-root="..">
+    <main>
+      <article class="article">
+        <h1>23 · 生产化</h1>
+        <p class="lede">
+          本地跑通和线上可用之间，隔着四件事：<strong>超时、重试、限流、部署</strong>。
+          这一章把它们落到 AgentScope 的具体参数上，也讲清楚哪些防护框架已经做了、
+          哪些必须你自己补。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>分清模型层、Agent 层、SDK 层三层重试，避免请求次数相乘</li>
+          <li>给模型调用、工具执行和整次 reply 分别设超时</li>
+          <li>用中间件限制本进程并发，并知道多进程为什么要靠网关</li>
+          <li>理解会话锁与 409 单飞，不让同一会话并行跑两轮</li>
+          <li>用 <code>create_app</code> 配出可水平扩展的部署，并接上健康检查</li>
+        </ul>
+
+        <h2 id="why">先说为什么：生产失败不是「代码有 bug」</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>现象</th>
+                <th>根因</th>
+                <th>该加什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>请求偶尔卡 10 分钟</td>
+                <td>上游连接挂起，没有超时</td>
+                <td>HTTP 超时 + 整次 reply 超时</td>
+              </tr>
+              <tr>
+                <td>429 一来就雪崩</td>
+                <td>无退避、无并发上限</td>
+                <td>指数退避 + 并发/配额限制</td>
+              </tr>
+              <tr>
+                <td>同一会话出现两份回答</td>
+                <td>用户双击或多标签页同时提交</td>
+                <td>会话锁 + 409 单飞</td>
+              </tr>
+              <tr>
+                <td>工具卡住，整个 reply 不动</td>
+                <td>工具没有超时或卸载</td>
+                <td>工具超时 + 后台卸载</td>
+              </tr>
+              <tr>
+                <td>重启后任务丢了一半</td>
+                <td>状态在内存、关闭不优雅</td>
+                <td>Redis 持久化 + 优雅关闭</td>
+              </tr>
+              <tr>
+                <td>账单突然翻十倍</td>
+                <td>循环、重试、上下文一起膨胀</td>
+                <td>迭代上限 + 预算中间件 + 成本告警</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          AgentScope 已经做了其中一部分：模型重试、会话锁、工具卸载、lifespan 清理。
+          但<strong>全局限流、整体超时、鉴权、多副本选主</strong>不在框架里，得在部署层补。
+        </p>
+
+        <h2 id="timeouts">超时：四层，别只设一层</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>层</th>
+                <th>默认行为</th>
+                <th>设在哪</th>
+                <th>超时后</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>HTTP 到模型</td>
+                <td>由 provider SDK 决定，可能很长</td>
+                <td><code>client_kwargs={"timeout": ...}</code></td>
+                <td>抛 <code>APITimeoutError</code></td>
+              </tr>
+              <tr>
+                <td>单次工具执行</td>
+                <td>App 默认 10 秒后转后台</td>
+                <td><code>ToolOffloadMiddleware(timeout_secs=...)</code></td>
+                <td><strong>不取消</strong>，转后台并稍后回送结果</td>
+              </tr>
+              <tr>
+                <td>整次 reply</td>
+                <td>无内建上限</td>
+                <td>自己用 <code>asyncio.wait_for</code> 或网关</td>
+                <td>取消协程，需处理中断状态</td>
+              </tr>
+              <tr>
+                <td>会话锁</td>
+                <td>租约 600 秒，心跳续期</td>
+                <td><code>MessageBusKeys.SESSION_RUN_TTL_SECS</code></td>
+                <td>持有进程崩溃后，其他进程最多等一个租约</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          OpenAI / DashScope 模型都接受 <code>client_kwargs</code>，直接透传给底层
+          <code>openai.AsyncClient</code>
+          <span class="src" data-src="src/agentscope/model/_openai_chat/_model.py:150">_model.py:150</span>。
+          生产里至少设一个明确值：
+        </p>
+        <pre><code>import os
+
+from agentscope.credential import OpenAICredential
+from agentscope.model import OpenAIChatModel
+
+model = OpenAIChatModel(
+    credential=OpenAICredential(
+        api_key=os.environ["OPENAI_API_KEY"],
+    ),
+    model="gpt-4.1",
+    max_retries=0,
+    client_kwargs={
+        "timeout": 30.0,
+        "max_retries": 3,
+    },
+)</code></pre>
+        <p>
+          这里故意把 AgentScope 的 <code>max_retries</code> 设为 0，把重试交给 SDK，
+          原因见下一节。
+        </p>
+        <h3>整次 reply 的超时</h3>
+        <pre><code>import asyncio
+
+from agentscope.message import UserMsg
+
+
+async def reply_with_timeout(agent, text: str, timeout: float = 120):
+    try:
+        return await asyncio.wait_for(
+            agent.reply(UserMsg(name="user", content=text)),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        # 超时是最后一道防线；用户主动取消优先用
+        # POST /sessions/{id}/interrupt
+        return None</code></pre>
+        <div class="callout warn">
+          <span class="ct"><code>wait_for</code> 会取消协程</span>
+          <p>
+            取消可能留下不完整的上下文与未释放的工具。用户可见的取消应走
+            <code>/sessions/{id}/interrupt</code>；<code>wait_for</code> 只用于兜底，
+            并配合前端重连与状态检查。
+          </p>
+        </div>
+        <p>
+          工具超时的语义也不是「杀掉工具」。<code>ToolOffloadMiddleware</code> 到点后把执行
+          <strong>转入后台</strong>，先给智能体一个占位结果；后台完成后通过收件箱与唤醒把真实结果送回
+          <span class="src" data-src="src/agentscope/app/middleware/_tool_offload_middleware.py:79">_tool_offload_middleware.py:79</span>。
+          有副作用的工具被「超时后继续跑」未必符合预期，需要自己判断。
+        </p>
+
+        <h2 id="retries">重试：三层叠起来会变成 16 次</h2>
+        <p>
+          同一件事有三层都在重试：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>层</th>
+                <th>重试什么</th>
+                <th>间隔</th>
+                <th>默认</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>模型 <code>ChatModelBase</code></td>
+                <td>只重试 provider 声明的可重试异常（连接、超时、429、5xx）</td>
+                <td>固定 <code>retry_delay</code></td>
+                <td>3 次</td>
+              </tr>
+              <tr>
+                <td>Agent <code>_call_model</code></td>
+                <td>捕获<strong>所有</strong> <code>Exception</code>，再切 fallback</td>
+                <td>无间隔</td>
+                <td>0 次（<code>ModelConfig.max_retries</code>）</td>
+              </tr>
+              <tr>
+                <td>Provider SDK</td>
+                <td>自己的一套重试与退避</td>
+                <td>指数退避</td>
+                <td>OpenAI SDK 自带</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          如果每层各重试 3 次，最坏情况是
+          <code>4 × 4 × 4 = 64</code> 次请求。即使只叠两层，也是 16 次。
+          正确做法是<strong>只保留一层重试</strong>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>策略</th>
+                <th>AgentScope</th>
+                <th>SDK</th>
+                <th>适合</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>交给 SDK 退避</td>
+                <td><code>max_retries=0</code></td>
+                <td><code>client_kwargs={"max_retries": 3}</code></td>
+                <td>推荐：有指数退避与抖动</td>
+              </tr>
+              <tr>
+                <td>交给 AgentScope</td>
+                <td><code>max_retries=3</code></td>
+                <td><code>client_kwargs={"max_retries": 0}</code></td>
+                <td>需要统一所有 provider 的固定间隔</td>
+              </tr>
+              <tr>
+                <td>只做降级</td>
+                <td>两层都 0，配 <code>fallback_model</code></td>
+                <td>0</td>
+                <td>主模型不可用时快速切换</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          AgentScope 模型层的重试循环在
+          <span class="src" data-src="src/agentscope/model/_base.py:208">_base.py:208</span>，
+          每次固定 <code>retry_delay</code> 秒；SDK 那层通常更聪明，所以生产更常把重试交给 SDK。
+        </p>
+        <div class="callout warn">
+          <span class="ct">工具不会被自动重试</span>
+          <p>
+            <code>tool_retries_limit</code>
+            <span class="src" data-src="src/agentscope/agent/_config.py:260">_config.py:260</span>
+            不是「重试次数」，而是同一个工具名 + 参数连续失败多少次后注入错误提示。
+            有副作用的工具更不能自动重放。
+          </p>
+        </div>
+
+        <h2 id="fallback">降级：主模型挂了怎么办</h2>
+        <p>
+          <code>ModelConfig</code> 支持一个备用模型：
+        </p>
+        <pre><code>from agentscope.agent import Agent, ModelConfig
+
+agent = Agent(
+    name="assistant",
+    system_prompt="You are a helpful assistant.",
+    model=primary,
+    model_config=ModelConfig(
+        max_retries=0,
+        fallback_model=backup,
+    ),
+)</code></pre>
+        <p>
+          <code>_call_model</code> 会先对主模型尝试
+          <code>max_retries + 1</code> 次，再切到备用模型
+          <span class="src" data-src="src/agentscope/agent/_agent.py:3317">_agent.py:3317</span>。
+          备用模型可以是不同厂商、不同价位，但要注意：
+        </p>
+        <ul>
+          <li>上下文窗口可能不同，长上下文请求切过去会直接失败</li>
+          <li>工具调用格式与能力可能不同，复杂 ReAct 场景要单独评测</li>
+          <li>Agent 层捕获<strong>所有</strong> <code>Exception</code>，
+            认证失败、参数错误也会触发降级，产生无谓调用</li>
+          <li>降级次数要打点：长期靠备用模型跑，说明主模型配置已经坏了</li>
+        </ul>
+        <div class="callout tip">
+          <span class="ct">降级不是重试</span>
+          <p>
+            重试是「同一个模型再试一次」，降级是「换一个模型」。前者解决瞬时抖动，
+            后者解决持续不可用。两者都开时，先想清楚总请求上限。
+          </p>
+        </div>
+
+        <h2 id="rate">限流：框架只管会话，不管全局配额</h2>
+        <p>
+          先区分三种「限流」：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>类型</th>
+                <th>谁来做</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Provider 429</td>
+                <td>模型层重试 / SDK 退避</td>
+                <td>缓解，不解决配额</td>
+              </tr>
+              <tr>
+                <td>本进程并发</td>
+                <td>自定义中间件</td>
+                <td>防止单实例打满</td>
+              </tr>
+              <tr>
+                <td>全局 QPS / 租户配额</td>
+                <td>API 网关、Redis 令牌桶</td>
+                <td>真正的配额与公平性</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          AgentScope 没有内建的全局限流器。单进程可以先加一个并发闸门：
+        </p>
+        <pre><code>import asyncio
+from typing import AsyncGenerator
+
+from agentscope.middleware import MiddlewareBase
+
+
+class ConcurrencyLimitMiddleware(MiddlewareBase):
+    """限制本进程内同时进行的模型调用数。"""
+
+    def __init__(self, limit: int = 8) -&gt; None:
+        self._sem = asyncio.Semaphore(limit)
+
+    async def on_model_call(self, agent, input_kwargs, next_handler):
+        await self._sem.acquire()
+        try:
+            result = await next_handler(**input_kwargs)
+        except BaseException:
+            self._sem.release()
+            raise
+
+        if isinstance(result, AsyncGenerator):
+            async def _limited():
+                try:
+                    async for chunk in result:
+                        yield chunk
+                finally:
+                    self._sem.release()
+
+            return _limited()
+
+        self._sem.release()
+        return result</code></pre>
+        <div class="callout warn">
+          <span class="ct">流式响应必须持有到消费完</span>
+          <p>
+            如果拿到异步生成器就释放信号量，限的只是「建立连接」，不是「占用模型」。
+            上面的写法把释放放在生成器的 <code>finally</code> 里；调用方必须消费或关闭生成器，
+            否则信号量会泄漏。
+          </p>
+        </div>
+        <p>
+          多进程部署时，这个信号量只在单进程内有效。全局配额应放在网关或 Redis：
+          按 <code>user_id</code> 做令牌桶，按模型做 QPS 上限，429 时返回
+          <code>Retry-After</code>。
+        </p>
+        <p>
+          AgentScope 会把 provider 的 429 归类成
+          <code>ErrorType.RATE_LIMIT</code>
+          <span class="src" data-src="src/agentscope/app/_service/_errors.py:18">_errors.py:18</span>，
+          前端可以据此提示「稍后再试」，而不是当成内部错误。
+        </p>
+
+        <h2 id="singleflight">会话单飞：同一会话只跑一轮</h2>
+        <p>
+          用户双击、多个标签页、渠道重复投递，都会让同一会话同时收到两次触发。
+          AgentScope 用两层保护：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>机制</th>
+                <th>范围</th>
+                <th>行为</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>消息总线会话锁</td>
+                <td>跨进程</td>
+                <td><code>agentscope:session:lock:{sid}</code>，租约 600 秒，心跳续期</td>
+              </tr>
+              <tr>
+                <td><code>ChatRunRegistry</code></td>
+                <td>单进程</td>
+                <td>同一会话已有运行中的 task 时拒绝再次 spawn</td>
+              </tr>
+              <tr>
+                <td><code>POST /chat</code></td>
+                <td>HTTP</td>
+                <td>重复提交返回 <strong>409</strong>，前端应提示「正在回答」</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          会话锁的语义在
+          <span class="src" data-src="src/agentscope/app/message_bus/_base.py:327">_base.py:327</span>：
+          阻塞获取，持有期间实现方用心跳续租，进程崩溃后其他副本最多等一个租约。
+          <code>ChatRunRegistry</code> 则只管本进程的 task
+          <span class="src" data-src="src/agentscope/app/_manager/_chat_run_registry.py:36">_chat_run_registry.py:36</span>，
+          关闭时会取消所有在途运行并等待 <code>finally</code> 执行完
+          <span class="src" data-src="src/agentscope/app/_manager/_chat_run_registry.py:117">_chat_run_registry.py:117</span>。
+        </p>
+        <p>
+          这意味着：同一会话的请求应该<strong>排队或拒绝</strong>，不要指望并行加速。
+          调度触发、队友消息、后台工具完成都通过收件箱 + 唤醒进入同一会话，而不是直接开新 run。
+        </p>
+
+        <h2 id="budget">预算与迭代上限：防止一轮跑一天</h2>
+        <p>
+          生产里最容易失控的不是单次调用，而是 ReAct 循环：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>旋钮</th>
+                <th>默认</th>
+                <th>建议</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>ReActConfig.max_iters</code><span class="src" data-src="src/agentscope/agent/_config.py:365">_config.py:365</span></td>
+                <td>50</td>
+                <td>按业务降到 8–15，超限后让模型收尾</td>
+              </tr>
+              <tr>
+                <td><code>tool_retries_limit</code></td>
+                <td>3</td>
+                <td>连续失败注入提示，避免无限重试同一调用</td>
+              </tr>
+              <tr>
+                <td><code>ReplyBudgetControlMiddleware</code></td>
+                <td>未启用</td>
+                <td>给单次 reply 设加权 token 上限（第 21 章）</td>
+              </tr>
+              <tr>
+                <td>上下文压缩阈值</td>
+                <td><code>trigger_ratio=0.8</code></td>
+                <td>长会话开启，避免每轮都带全量历史</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <code>max_iters</code> 不是越大越好。50 轮意味着最多 50 次模型调用 ×
+          每次上下文增长，费用和延迟都是线性甚至更快上升。
+        </p>
+
+        <h2 id="graceful">优雅关闭：别让在途请求死在半路</h2>
+        <p>
+          应用启动与关闭由 <code>lifespan</code> 统一管理：所有有生命周期的资源都通过
+          <code>AsyncExitStack</code> 进入，关闭时按相反顺序拆除，启动中途失败也会清理已进入的资源
+          <span class="src" data-src="src/agentscope/app/_lifespan.py:37">_lifespan.py:37</span>。
+        </p>
+        <p>
+          关闭时 <code>ChatRunRegistry</code> 会取消所有在途 chat run，并等待它们释放会话锁
+          <span class="src" data-src="src/agentscope/app/_manager/_chat_run_registry.py:117">_chat_run_registry.py:117</span>。
+          部署侧要配合：
+        </p>
+        <ul>
+          <li>Kubernetes 先摘流量，再发 SIGTERM：加 <code>preStop</code> 小睡几秒</li>
+          <li><code>terminationGracePeriodSeconds</code> 要大于应用清理时间</li>
+          <li>uvicorn 设 <code>--timeout-graceful-shutdown</code>，给在途请求留窗口</li>
+          <li>SSE 客户端要能重连并从回放日志恢复（第 16 章）</li>
+        </ul>
+        <p>
+          Redis 里的会话锁有 TTL，进程被 SIGKILL 也不会永久死锁；但另一个副本要等租约到期
+          （默认 600 秒）才能接手。这就是为什么缩短关闭时间比直接 kill 更重要。
+        </p>
+
+        <h2 id="topology">部署拓扑：单进程、多进程与独立 worker</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>形态</th>
+                <th>存储 / 总线</th>
+                <th>适合</th>
+                <th>注意</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>单进程</td>
+                <td>Redis / 内存总线</td>
+                <td>本地开发、桌面版</td>
+                <td><code>InMemoryMessageBus</code> 不能跨进程</td>
+              </tr>
+              <tr>
+                <td>多副本 API</td>
+                <td>RedisStorage + RedisMessageBus</td>
+                <td>生产水平扩展</td>
+                <td>共享 <code>download_secret</code>，调度/渠道只留一个</td>
+              </tr>
+              <tr>
+                <td>独立索引 worker</td>
+                <td>Redis / SQL + blob store</td>
+                <td>大文档摄取</td>
+                <td>API 侧 <code>enable_index_worker=False</code></td>
+              </tr>
+              <tr>
+                <td>独立渠道 worker</td>
+                <td>Redis</td>
+                <td>飞书 / 钉钉 / Discord 长连接</td>
+                <td>只允许一个进程 <code>enable_channel_worker=True</code></td>
+              </tr>
+              <tr>
+                <td>独立调度进程</td>
+                <td>Redis</td>
+                <td>Cron 任务</td>
+                <td>只允许一个进程 <code>enable_scheduler=True</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct">多副本都开调度会重复执行</span>
+          <p>
+            APScheduler 的 jobstore 在内存里，每个持有定时器的进程都会响应 cron。
+            多个副本各跑一遍，任务就会重复。用环境变量只在一个角色上开启。
+          </p>
+        </div>
+        <p>
+          <code>enable_index_worker</code>
+          <span class="src" data-src="src/agentscope/app/_app.py:121">_app.py:121</span>、
+          <code>enable_channel_worker</code>
+          <span class="src" data-src="src/agentscope/app/_app.py:125">_app.py:125</span>、
+          <code>enable_scheduler</code>
+          <span class="src" data-src="src/agentscope/app/_app.py:126">_app.py:126</span>
+          都是 <code>create_app</code> 的关键字参数。
+        </p>
+
+        <h2 id="config">create_app 生产参数</h2>
+        <pre><code>import os
+
+from agentscope.app import create_app
+from agentscope.app.message_bus import RedisMessageBus
+from agentscope.app.storage import RedisStorage
+from agentscope.app.workspace_manager import LocalWorkspaceManager
+
+storage = RedisStorage(
+    host=os.environ["REDIS_HOST"],
+    port=int(os.environ.get("REDIS_PORT", "6379")),
+)
+message_bus = RedisMessageBus(
+    host=os.environ["REDIS_HOST"],
+    port=int(os.environ.get("REDIS_PORT", "6379")),
+)
+workspace_manager = LocalWorkspaceManager(
+    basedir="/data/workspaces",
+    ttl=3600.0,
+)
+
+app = create_app(
+    storage=storage,
+    message_bus=message_bus,
+    workspace_manager=workspace_manager,
+    download_secret=os.environ["DOWNLOAD_SECRET"],
+    enable_scheduler=os.getenv("ENABLE_SCHEDULER") == "1",
+    enable_channel_worker=os.getenv("ENABLE_CHANNEL_WORKER") == "1",
+    enable_index_worker=os.getenv("ENABLE_INDEX_WORKER") == "1",
+)</code></pre>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>参数</th>
+                <th>为什么生产必须管</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>storage</code> / <code>message_bus</code></td>
+                <td>多副本共享状态、会话锁、回放与唤醒</td>
+              </tr>
+              <tr>
+                <td><code>workspace_manager</code></td>
+                <td>工作目录与 TTL；容器里要给持久卷</td>
+              </tr>
+              <tr>
+                <td><code>download_secret</code><span class="src" data-src="src/agentscope/app/_app.py:135">_app.py:135</span></td>
+                <td>负载均衡后必须共享，否则下载令牌跨副本失效</td>
+              </tr>
+              <tr>
+                <td><code>enable_scheduler</code></td>
+                <td>只留一个进程，避免 cron 重复</td>
+              </tr>
+              <tr>
+                <td><code>enable_channel_worker</code></td>
+                <td>平台长连接只应有一条</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          多 worker 启动用 <code>uvicorn app:app --workers N</code> 即可；
+          前提是存储与消息总线都是 Redis 或外部共享实现。用
+          <code>InMemoryMessageBus</code> 时不要开多 worker。
+        </p>
+
+        <h2 id="health">健康检查：I/O-free，但需要身份头</h2>
+        <p>
+          <code>GET /health</code>
+          <span class="src" data-src="src/agentscope/app/_router/_health.py:34">_health.py:34</span>
+          返回各组件状态：<code>ok</code> / <code>not_ready</code> /
+          <code>disabled</code>。它刻意不做 I/O，只检查 <code>app.state</code> 上是否挂好了组件
+          <span class="src" data-src="src/agentscope/app/_router/_health.py:41">_health.py:41</span>：
+          任一组件的 <code>not_ready</code> 会把 HTTP 状态降为 503
+          <span class="src" data-src="src/agentscope/app/_router/_health.py:83">_health.py:83</span>。
+        </p>
+        <pre><code>components:
+  storage: ok
+  message_bus: ok
+  workspace_manager: ok
+  chat_service: ok
+  scheduler_manager: ok
+  mcp_hubs: disabled
+  knowledge_base: disabled</code></pre>
+        <div class="callout warn">
+          <span class="ct">/health 需要 <code>X-User-ID</code></span>
+          <p>
+            它依赖 <code>get_current_user_id</code>
+            <span class="src" data-src="src/agentscope/app/_router/_health.py:37">_health.py:37</span>，
+            默认实现从 <code>X-User-ID</code> 头取身份
+            <span class="src" data-src="src/agentscope/app/deps.py:35">deps.py:35</span>。
+            裸的 k8s probe 会得到 401。要么给 probe 加请求头，要么另加一个只检查进程的
+            <code>/livez</code>。
+          </p>
+        </div>
+        <ul>
+          <li><strong>liveness</strong> 只判断进程是否活着，别依赖外部 Redis</li>
+          <li><strong>readiness</strong> 用 <code>/health</code>，覆盖组件是否挂好</li>
+          <li>把应用挂成子应用（mount）时，Starlette 不会运行子应用 lifespan，
+            <code>/health</code> 会一直 <code>not_ready</code>，这正是它想帮你抓到的配置错误</li>
+        </ul>
+
+        <h2 id="security">鉴权与密钥：默认的 X-User-ID 不是鉴权</h2>
+        <p>
+          <code>X-User-ID</code> 只是占位：任何客户端都能自称任意用户。
+          生产必须替换成 JWT / OAuth / session token：
+        </p>
+        <pre><code>from fastapi import Header, HTTPException, status
+
+from agentscope.app.deps import get_current_user_id as default_dependency
+
+
+async def verify_token(token: str) -&gt; str | None:
+    """替换成你的 JWT / OAuth 校验。"""
+    return None
+
+
+async def get_current_user_id(
+    authorization: str = Header(...),
+) -&gt; str:
+    token = authorization.removeprefix("Bearer ").strip()
+    user_id = await verify_token(token)
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token.",
+        )
+    return user_id
+
+
+app.dependency_overrides[default_dependency] = get_current_user_id</code></pre>
+        <p>
+          其余安全边界：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>项</th>
+                <th>做法</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>模型 API key</td>
+                <td>存进凭证记录（加密），不要写进镜像或日志</td>
+              </tr>
+              <tr>
+                <td>下载令牌</td>
+                <td>多副本共享 <code>download_secret</code>，短期有效</td>
+              </tr>
+              <tr>
+                <td>CORS</td>
+                <td>用 <code>extra_middlewares</code> 显式列出来源，别长期 <code>*</code></td>
+              </tr>
+              <tr>
+                <td>工具执行</td>
+                <td>用权限模式与沙箱工作区限制文件 / 命令访问</td>
+              </tr>
+              <tr>
+                <td>OpenAPI</td>
+                <td>对外网关下按需关闭或限制 <code>/docs</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="storage">存储与迁移：别让两个副本同时建表</h2>
+        <p>
+          内置两种持久化：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>实现</th>
+                <th>适合</th>
+                <th>注意</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>RedisStorage</code></td>
+                <td>示例与多数线上部署</td>
+                <td>HA、持久化、备份由 Redis 侧负责</td>
+              </tr>
+              <tr>
+                <td><code>AsyncSQLAlchemyStorage</code></td>
+                <td>已有 PostgreSQL / MySQL</td>
+                <td>需 <code>agentscope[sql]</code> + 对应 async 驱动</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          SQL 后端默认 <code>create_tables=True</code>
+          <span class="src" data-src="src/agentscope/app/storage/_sql/_storage.py:115">_storage.py:115</span>，
+          启动时执行 <code>CREATE TABLE IF NOT EXISTS</code>；<code>auto_migrate</code>
+          <span class="src" data-src="src/agentscope/app/storage/_sql/_storage.py:116">_storage.py:116</span>
+          默认关闭。生产多副本不要开 <code>auto_migrate</code>：两个副本同时跑迁移不安全。
+          正确做法是部署流水线里单独执行：
+        </p>
+        <pre><code>alembic upgrade head</code></pre>
+        <p>
+          然后把应用侧设成 <code>create_tables=False, auto_migrate=False</code>。
+          工作区目录用持久卷，注意 <code>ttl</code> 到期淘汰与关闭时的
+          <code>close_all</code>。
+        </p>
+
+        <h2 id="docker">容器化：一个能跑的最小镜像</h2>
+        <pre><code>FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN pip install "agentscope==2.0.11" uvicorn
+
+RUN useradd -m app \
+    &amp;&amp; mkdir -p /data/workspaces \
+    &amp;&amp; chown -R app:app /data
+
+COPY --chown=app:app app.py .
+
+USER app
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--proxy-headers", \
+     "--timeout-graceful-shutdown", "30"]</code></pre>
+        <ul>
+          <li>版本钉死到 <code>2.0.11</code>，避免构建日与运行日拉到的版本不同</li>
+          <li>镜像里不放密钥，全部用环境变量或密钥管理注入</li>
+          <li><code>/data/workspaces</code> 挂持久卷；容器重建后工作区还在</li>
+          <li>需要 SQL 时在构建阶段加 <code>agentscope[sql]</code> 与数据库驱动</li>
+          <li>MCP 依赖的外部运行时（Node、Playwright 等）要单独装进镜像</li>
+          <li>不要把 <code>/health</code> 直接写进 Dockerfile 的 <code>HEALTHCHECK</code>，
+            它需要身份头；用专门的 <code>/livez</code></li>
+        </ul>
+
+        <h2 id="alerting">上线后看什么</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>指标</th>
+                <th>告警思路</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>错误率（按 <code>ErrorType</code>）</td>
+                <td>认证 / 权限错误持续出现说明配置坏了；429 升高说明配额不够</td>
+              </tr>
+              <tr>
+                <td>P95 / P99 reply 延迟</td>
+                <td>按模型、工具、租户拆开看</td>
+              </tr>
+              <tr>
+                <td>fallback 比例</td>
+                <td>持续升高说明主模型不可用</td>
+              </tr>
+              <tr>
+                <td>工具卸载次数</td>
+                <td>突增说明工具变慢或外部依赖抖动</td>
+              </tr>
+              <tr>
+                <td>会话锁等待时间</td>
+                <td>同一会话被频繁并发触发，或某轮跑太久</td>
+              </tr>
+              <tr>
+                <td>token / 成本（按租户）</td>
+                <td>接第 21 章的成本中间件，设日预算告警</td>
+              </tr>
+              <tr>
+                <td>索引队列积压</td>
+                <td>文档摄取跟不上，或 worker 挂了</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          这些指标大多能从第 21 章的 span 与事件流里算出来。没有观测的限流是盲限，
+          没有限流的观测只能事后复盘。
+        </p>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>设 HTTP 超时</td><td><code>client_kwargs={"timeout": 30}</code></td></tr>
+              <tr><td>避免重试相乘</td><td>只保留 SDK 或 AgentScope 一层重试</td></tr>
+              <tr><td>主备模型</td><td><code>ModelConfig(fallback_model=...)</code></td></tr>
+              <tr><td>限制并发</td><td>自定义 <code>on_model_call</code> + <code>Semaphore</code></td></tr>
+              <tr><td>全局配额</td><td>网关 / Redis 令牌桶</td></tr>
+              <tr><td>会话单飞</td><td>会话锁 + <code>ChatRunRegistry</code>，重复提交 409</td></tr>
+              <tr><td>限制循环</td><td><code>ReActConfig(max_iters=12)</code></td></tr>
+              <tr><td>多副本</td><td><code>RedisStorage</code> + <code>RedisMessageBus</code></td></tr>
+              <tr><td>单例角色</td><td>只用一份进程开 scheduler / channel worker</td></tr>
+              <tr><td>健康检查</td><td><code>GET /health</code>（带身份头）或另加 <code>/livez</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">三层重试全开</span>
+          <p>
+            AgentScope + SDK + Agent 各试几次，最坏是几十次请求。先数清楚总尝试上限，
+            再决定哪一层负责退避。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">只设了 HTTP 超时</span>
+          <p>
+            模型调用没超时，但一次 reply 可能包含十几次调用和工具。没有整体上限，
+            请求仍可能挂很久。网关侧也要有总超时。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">以为工具超时会停掉工具</span>
+          <p>
+            <code>ToolOffloadMiddleware</code> 是转后台继续跑，不是取消。对有副作用、
+            不能被延迟执行的操作要单独设计。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">多副本都开 scheduler / channel worker</span>
+          <p>
+            Cron 会重复执行，IM 长连接会重复消费或互相顶掉。用环境变量把这两个角色限制在
+            一个进程。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">多副本不设 <code>download_secret</code></span>
+          <p>
+            每个进程各自生成密钥，A 副本签发的下载令牌到 B 副本会被拒绝，表现为随机 401/403。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">把 <code>/health</code> 当 liveness 且不带请求头</span>
+          <p>
+            默认依赖会返回 401。要么给 probe 加 <code>X-User-ID</code>，
+            要么写一个不依赖身份的 <code>/livez</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">生产用 <code>InMemoryMessageBus</code></span>
+          <p>
+            它只在单进程内有效，多 worker 下锁、回放、唤醒全部失效。水平扩展必须换
+            <code>RedisMessageBus</code>。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">把限流和预算分开</span>
+          <p>
+            限流控制「同时打多少请求」，预算控制「一次能花多少 token」。
+            两者解决不同问题，缺一个都会在高峰期失控。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li>AgentScope 模型层、Agent 层、SDK 层分别重试什么？为什么不能同时开满？</li>
+          <li>工具执行超时后发生了什么？为什么说它不是「取消」？</li>
+          <li>多副本部署时，哪些进程必须唯一？<code>download_secret</code> 为什么必须共享？</li>
+        </ol>
+
+        <h2 id="exercise">30 分钟动手练习</h2>
+        <ol>
+          <li>把模型超时设为 10 秒，用一个慢接口验证 <code>APITimeoutError</code> 路径。</li>
+          <li>分别用「SDK 重试」和「AgentScope 重试」各跑一次，数日志里的实际请求次数。</li>
+          <li>写一个并发限制中间件，用两个并发的流式请求确认信号量在流结束后释放。</li>
+          <li>用 Redis 起两个 uvicorn worker，重复提交同一会话，确认第二个请求得到 409。</li>
+          <li>给 <code>/health</code> 加一个带 <code>X-User-ID</code> 的探针；再写一个不依赖身份的 <code>/livez</code>。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          单机与多副本都稳了之后，下一步是把 Agent 的能力开放给外部系统。
+          下一章 <strong>24 A2A 协议：和外部 Agent 对话</strong> 讲 Agent Card、
+          远程任务生命周期与跨框架互操作。想先复习流式会话，可以回
+          <a href="16-session-sse.html">16 会话与 SSE</a>。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
