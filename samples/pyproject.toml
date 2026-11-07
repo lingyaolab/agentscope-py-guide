@@ -1,0 +1,22 @@
+[project]
+name = "agentscope-py-guide-samples"
+version = "1.0.0"
+description = "Runnable samples for the AgentScope Python 2.0.11 guide"
+requires-python = ">=3.11"
+dependencies = [
+  "agentscope==2.0.11",
+  "python-dotenv>=1.0",
+  "pytest>=8",
+  "aiosqlite>=0.20",
+]
+
+[project.optional-dependencies]
+service = [
+  "agentscope[service,sql]==2.0.11",
+  "aiosqlite>=0.20",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"

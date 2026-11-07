@@ -2,6 +2,16 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.32.0 — 2026-11-07
+
+新增可运行的 Python 配套示例。
+
+- `samples/` 提供 Agent、工具、事件流、中间件、AgentState 与 Agent Service 的完整示例。
+- 默认使用脚本化 fake model，不访问网络；设置 `DEEPSEEK_API_KEY` 后走真实 DeepSeek。
+- `pytest` 覆盖 Agent 回复与 FunctionTool schema；`s15_service.py` 用 SQLite + 进程内总线起服务，`/health` 已验证。
+- 真实模型冒烟脚本 `s00_live_smoke.py` 已在 DeepSeek 上跑通。
+- `.env` 与 `.venv` 均已忽略，不提交密钥。
+
 ## v0.31.0 — 2026-11-07
 
 新增附录 G「动手练习答案」。
