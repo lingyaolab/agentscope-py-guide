@@ -2,6 +2,24 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.25.0 — 2026-11-07
+
+新增第 25 章「实时语音」，把 TTS、ASR 与端到端语音串起来。
+
+- **三条路线**：TTS 中间件配音、ASR + 文本 Agent + TTS、端到端 Realtime。
+- **TTS**：标准 `synthesize()` 与流式 `push()`，Qwen3 token 级与 CosyVoice 分句级差异。
+- **TTSMiddleware**：标准模式等整段文本，实时模式随 delta 推送；音频以 `DataBlock` 事件注入。
+- **ASR**：`ASRModelBase` 的批量与实时接口；2.0.11 仅内置 OpenAI 批量实现。
+- **RealtimeAgent**：模型、传输、Agent 三段式；模型会话与音频传输分开管理。
+- **最小运行**：`LocalAudioTransport` 采样率取模型属性；耳机、回声与蓝牙注意事项。
+- **事件**：用户轮次 `role="user"`、文本/音频/工具事件、按 `reply_id` 归集。
+- **打断**：`PlayoutPosition.played_ms` 截断上下文，`TextBlockEndEvent.text` 覆盖已发文本；模型侧截断能力因协议而异。
+- **工具与确认**：确认不阻塞事件流，300 秒超时按拒绝。
+- **回合**：模型 API 检测 vs 本地 VAD，`TurnAggregator` 合并与过滤。
+- **重连**：各家会话超时后自动重连与历史补发；Qwen-Omni 不支持文本轮次。
+- **WebRTC**：Agent Service 的 `/realtime/models`、`/realtime/config`、`/sessions/{id}/offer`。
+- **延迟与成本**：`last_turn_metrics` 拆解与音频带宽估算。
+
 ## v0.24.0 — 2026-11-07
 
 新增第 24 章「A2A 协议」，讲清楚 Agent 之间怎么互相调用。

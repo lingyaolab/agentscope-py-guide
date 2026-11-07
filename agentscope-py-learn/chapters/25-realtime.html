@@ -1,0 +1,820 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 实时语音：TTS 标准与流式输入、TTSMiddleware、OpenAI ASR 批量转写、RealtimeAgent 三段式、LocalAudioTransport、打断与截断、工具确认、VAD 与 TurnAggregator、断线重连、WebRTC 接入与延迟指标。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="25 实时语音：TTS、ASR 与语音到语音 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="TTS 与 ASR、TTSMiddleware、RealtimeAgent、LocalAudioTransport、打断、工具确认、VAD、重连与 WebRTC。" />
+    <title>25 实时语音：TTS、ASR 与语音到语音 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="25-realtime" data-root="..">
+    <main>
+      <article class="article">
+        <h1>25 · 实时语音</h1>
+        <p class="lede">
+          语音不是「把文字读出来」这么简单：要处理谁说完了、能不能打断、
+          用户到底听到了哪一句、模型会话断了怎么接。
+          这一章分三条路线讲：TTS 合成、ASR 转写、以及端到端的 <code>RealtimeAgent</code>。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>用 TTS 合成音频，并区分标准模式与流式输入模式</li>
+          <li>用 <code>TTSMiddleware</code> 给普通文本 Agent 加上语音输出</li>
+          <li>用 OpenAI ASR 批量转写，知道 2.0.11 的实时 ASR 边界</li>
+          <li>用 <code>RealtimeAgent</code> + <code>LocalAudioTransport</code> 跑通语音对话</li>
+          <li>理解打断时的播放位置、上下文截断与不同模型的截断能力</li>
+        </ul>
+
+        <h2 id="why">先说为什么：三条路线，不是一套 API</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>路线</th>
+                <th>链路</th>
+                <th>延迟</th>
+                <th>适合</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>TTS 中间件</td>
+                <td>文本 Agent → TTS → 音频事件</td>
+                <td>中</td>
+                <td>已有文本 Agent，想加语音播报</td>
+              </tr>
+              <tr>
+                <td>ASR + 文本 Agent + TTS</td>
+                <td>录音 → 转写 → Agent → 合成</td>
+                <td>高</td>
+                <td>录音问答、会议纪要、离线批处理</td>
+              </tr>
+              <tr>
+                <td>端到端 Realtime</td>
+                <td>音频直接进出语音模型</td>
+                <td>低</td>
+                <td>实时对话、可打断、保留语气</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          三条路线的 API 不同，别指望一个 <code>Agent</code> 参数全包。
+          先想清楚你要的是「给文字回复配音」，还是「像打电话一样对话」。
+        </p>
+
+        <h2 id="tts">TTS 模型：标准与流式输入</h2>
+        <p>
+          所有 TTS 模型都继承
+          <code>TTSModelBase</code>
+          <span class="src" data-src="src/agentscope/tts/_tts_base.py:18">_tts_base.py:18</span>，
+          用 <code>realtime</code>
+          <span class="src" data-src="src/agentscope/tts/_tts_base.py:49">_tts_base.py:49</span>
+          区分两种模式：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>模式</th>
+                <th>调用</th>
+                <th>适合</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>标准</td>
+                <td><code>synthesize(text)</code>，返回完整音频或分块流</td>
+                <td>一次拿到整段文本</td>
+              </tr>
+              <tr>
+                <td>流式输入</td>
+                <td><code>push(delta)</code> 边生成边推，<code>synthesize()</code> 收尾</td>
+                <td>对接 LLM 的流式输出</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          2.0.11 内置的模型类：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>类</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>OpenAITTSModel</code><span class="src" data-src="src/agentscope/tts/_openai/_model.py:46">_model.py:46</span></td><td>tts-1 / tts-1-hd / gpt-4o-mini-tts，mp3 / wav / opus 等</td></tr>
+              <tr><td><code>DashScopeTTSModel</code><span class="src" data-src="src/agentscope/tts/_dashscope/_model.py:51">_model.py:51</span></td><td>Qwen3-TTS，标准模式</td></tr>
+              <tr><td><code>DashScopeRealtimeTTSModel</code><span class="src" data-src="src/agentscope/tts/_dashscope/_realtime_model.py:184">_realtime_model.py:184</span></td><td>Qwen3-TTS WebSocket 流式输入</td></tr>
+              <tr><td><code>DashScopeCosyVoiceTTSModel</code><span class="src" data-src="src/agentscope/tts/_dashscope/_cosyvoice_model.py:30">_cosyvoice_model.py:30</span></td><td>CosyVoice-v3，标准 / 实时两种模式</td></tr>
+              <tr><td><code>GeminiTTSModel</code></td><td>Gemini 2.5 TTS，流式输出</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="tts-call">直接合成：synthesize 与 push</h2>
+        <pre><code>import os
+
+from agentscope.credential import OpenAICredential
+from agentscope.tts import OpenAITTSModel
+
+
+async def main() -&gt; None:
+    tts = OpenAITTSModel(
+        credential=OpenAICredential(
+            api_key=os.environ["OPENAI_API_KEY"],
+        ),
+        model="tts-1",
+        parameters=OpenAITTSModel.Parameters(
+            voice="alloy",
+            response_format="mp3",
+        ),
+        stream=True,
+    )
+
+    async for chunk in await tts.synthesize("你好，世界！"):
+        if chunk.content:
+            print(chunk.content.source.media_type, chunk.is_last)</code></pre>
+        <p>
+          <code>synthesize()</code>
+          <span class="src" data-src="src/agentscope/tts/_tts_base.py:187">_tts_base.py:187</span>
+          的返回类型取决于 <code>stream</code>：
+          <code>False</code> 返回单个 <code>TTSResponse</code>，<code>True</code> 返回异步生成器，
+          最后一个 chunk 的 <code>is_last=True</code>。
+        </p>
+        <p>
+          <code>TTSResponse</code>
+          <span class="src" data-src="src/agentscope/tts/_tts_response.py:30">_tts_response.py:30</span>
+          的 <code>content</code> 是一个 <code>DataBlock</code>，媒体类型在
+          <code>content.source.media_type</code>，例如
+          <code>audio/mpeg</code>、<code>audio/wav</code>、
+          <code>audio/pcm;rate=24000</code>。
+        </p>
+        <h3>流式输入</h3>
+        <pre><code>import os
+
+from agentscope.credential import DashScopeCredential
+from agentscope.tts import DashScopeRealtimeTTSModel
+
+
+async def speak() -&gt; None:
+    tts = DashScopeRealtimeTTSModel(
+        credential=DashScopeCredential(
+            api_key=os.environ["DASHSCOPE_API_KEY"],
+        ),
+        model="qwen3-tts-flash-realtime",
+        parameters=DashScopeRealtimeTTSModel.Parameters(voice="Cherry"),
+        stream=True,
+    )
+
+    async with tts:
+        await tts.push("你好，")
+        await tts.push("今天过得怎么样？")
+        final = await tts.synthesize()</code></pre>
+        <p>
+          <code>push()</code>
+          <span class="src" data-src="src/agentscope/tts/_tts_base.py:112">_tts_base.py:112</span>
+          追加文本并返回当前已可用的音频；<code>synthesize()</code> 结束并刷新剩余缓冲。
+        </p>
+        <div class="callout tip">
+          <span class="ct">Qwen3 按 token，CosyVoice 按句子</span>
+          <p>
+            <code>DashScopeRealtimeTTSModel</code> 通常每次 <code>push()</code> 都有音频；
+            CosyVoice 实时模式要等服务端分句，未成句时可能返回空响应。
+            两种行为都正常，不要拿「每次 push 必须有音频」写死。
+          </p>
+        </div>
+
+        <h2 id="asr">ASR：批量转写与实时接口</h2>
+        <p>
+          ASR 基类
+          <code>ASRModelBase</code>
+          <span class="src" data-src="src/agentscope/asr/_asr_base.py:19">_asr_base.py:19</span>
+          同时声明了批量与实时两种用法：
+        </p>
+        <ul>
+          <li>批量：直接 <code>transcribe(audio=..., filename=...)</code></li>
+          <li>实时：<code>push(audio)</code> 分块，最后 <code>transcribe()</code> 收尾</li>
+        </ul>
+        <p>
+          但 <strong>2.0.11 只内置了 OpenAI 批量实现</strong>
+          <span class="src" data-src="src/agentscope/asr/_openai/_model.py:14">_model.py:14</span>；
+          实时接口留给自定义实现。
+        </p>
+        <pre><code>import os
+from pathlib import Path
+
+from agentscope.asr import OpenAIASRModel
+from agentscope.credential import OpenAICredential
+
+
+async def transcribe(path: str) -&gt; str:
+    audio = Path(path)
+    asr = OpenAIASRModel(
+        credential=OpenAICredential(
+            api_key=os.environ["OPENAI_API_KEY"],
+        ),
+        model="gpt-4o-mini-transcribe",
+        parameters=OpenAIASRModel.Parameters(language="zh"),
+    )
+    response = await asr.transcribe(
+        audio=audio.read_bytes(),
+        filename=audio.name,
+    )
+    return response.content.text if response.content else ""</code></pre>
+        <p>
+          <code>filename</code> 不是装饰：批量 API 靠扩展名判断内存音频的格式。
+          <code>transcribe()</code>
+          <span class="src" data-src="src/agentscope/asr/_asr_base.py:209">_asr_base.py:209</span>
+          的最终响应 <code>is_last=True</code>，
+          <code>ASRResponse.content</code>
+          <span class="src" data-src="src/agentscope/asr/_asr_response.py:14">_asr_response.py:14</span>
+          是 <code>TextBlock</code> 或 <code>None</code>。
+        </p>
+        <p>
+          <code>language</code> 用 ISO-639-1（如 <code>zh</code>），
+          <code>prompt</code> 可以引导专有名词。两者都放在
+          <code>Parameters</code> 里，也可以单次调用覆盖。
+        </p>
+
+        <h2 id="middleware">TTSMiddleware：给文本 Agent 配音</h2>
+        <p>
+          <code>TTSMiddleware</code>
+          <span class="src" data-src="src/agentscope/middleware/_tts_middleware.py:21">_tts_middleware.py:21</span>
+          拦截 reply 流里的文本块，把合成音频作为 <code>DataBlock</code> 事件插回同一条流。
+        </p>
+        <pre><code>import os
+
+from agentscope.agent import Agent
+from agentscope.credential import DashScopeCredential
+from agentscope.middleware import TTSMiddleware
+from agentscope.tts import DashScopeTTSModel
+
+tts = DashScopeTTSModel(
+    credential=DashScopeCredential(
+        api_key=os.environ["DASHSCOPE_API_KEY"],
+    ),
+    model="qwen3-tts-flash",
+    parameters=DashScopeTTSModel.Parameters(voice="Cherry"),
+    stream=True,
+)
+
+agent = Agent(
+    name="assistant",
+    system_prompt="你是一个中文语音助手，回答尽量简短。",
+    model=chat_model,
+    middlewares=[TTSMiddleware(tts)],
+)</code></pre>
+        <p>
+          <code>on_reply</code>
+          <span class="src" data-src="src/agentscope/middleware/_tts_middleware.py:51">_tts_middleware.py:51</span>
+          的行为取决于 TTS 模型：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>TTS 模式</th>
+                <th>中间件行为</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>标准</td>
+                <td>等 <code>TextBlockEndEvent</code> 拿到完整文本，再 <code>synthesize(text)</code></td>
+              </tr>
+              <tr>
+                <td>实时输入</td>
+                <td>每个 <code>TextBlockDeltaEvent</code> 调 <code>push(delta)</code>，结束事件时 <code>synthesize()</code> 收尾</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          音频事件是增量 base64：<code>DataBlockStartEvent</code> →
+          多个 <code>DataBlockDeltaEvent</code> → <code>DataBlockEndEvent</code>，
+          按 <code>block_id</code> 拼成完整音频。
+        </p>
+        <div class="callout warn">
+          <span class="ct">标准模式首字延迟高</span>
+          <p>
+            标准 TTS 要等模型把整段话生成完才开始合成。对话场景优先用实时输入，
+            或者让模型按短句输出。
+          </p>
+        </div>
+
+        <h2 id="realtime">端到端语音：RealtimeAgent 三件套</h2>
+        <p>
+          <code>RealtimeAgent</code>
+          <span class="src" data-src="src/agentscope/agent/_realtime/_agent.py:102">_agent.py:102</span>
+          把语音对话拆成三个对象：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>对象</th>
+                <th>职责</th>
+                <th>谁持有生命周期</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>RealtimeModelBase</code></td>
+                <td>维护模型 WebSocket，声明采样率与能力</td>
+                <td><code>RealtimeAgent</code></td>
+              </tr>
+              <tr>
+                <td><code>TransportBase</code></td>
+                <td>采集与播放音频、报告播放进度、打断淡出</td>
+                <td>开发者</td>
+              </tr>
+              <tr>
+                <td><code>RealtimeAgent</code></td>
+                <td>回合划分、打断、工具调用、事件产出、断线重连</td>
+                <td>开发者</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          模型会话和音频传输是分开的：客户端断开可以保留模型会话，
+          模型会话超时也不影响传输。换一个传输再调 <code>reply_stream()</code>，
+          对话历史仍在 <code>agent.state</code> 里。
+        </p>
+
+        <h2 id="realtime-start">最小可运行：模型 + Agent + 本地声卡</h2>
+        <p>
+          先装可选依赖（本地声卡依赖 PortAudio，Linux 需要
+          <code>libportaudio2</code>）：
+        </p>
+        <pre><code>pip install "agentscope[realtime]"</code></pre>
+        <pre><code>import os
+
+from agentscope.agent import RealtimeAgent
+from agentscope.credential import DashScopeCredential
+from agentscope.event import ReplyEndEvent, TextBlockDeltaEvent
+from agentscope.realtime import (
+    DashScopeRealtimeModel,
+    LocalAudioTransport,
+)
+
+model = DashScopeRealtimeModel(
+    model="qwen3.5-omni-plus-realtime",
+    credential=DashScopeCredential(
+        api_key=os.environ["DASHSCOPE_API_KEY"],
+    ),
+    parameters=DashScopeRealtimeModel.Parameters(voice="Tina"),
+)
+
+agent = RealtimeAgent(
+    name="Friday",
+    system_prompt="你是一个中文语音助手，回答尽量简短。",
+    model=model,
+)
+
+transport = LocalAudioTransport(
+    input_sample_rate=model.input_sample_rate,
+    output_sample_rate=model.output_sample_rate,
+)
+
+
+async def main() -&gt; None:
+    async with agent, transport:
+        async for event in agent.reply_stream(transport):
+            if isinstance(event, TextBlockDeltaEvent):
+                print(event.delta, end="", flush=True)
+            elif isinstance(event, ReplyEndEvent):
+                print()</code></pre>
+        <p>
+          采样率<strong>不要写死</strong>。DashScope 上行通常是 16 kHz，OpenAI 与 xAI 是 24 kHz；
+          直接用模型的 <code>input_sample_rate</code> / <code>output_sample_rate</code>
+          构造传输，换模型不会炸。
+        </p>
+        <div class="callout warn">
+          <span class="ct">戴耳机，别外放</span>
+          <p>
+            <code>LocalAudioTransport</code> 不做回声消除。外放时麦克风会录到智能体自己的声音，
+            回合检测会把它当用户开口，于是智能体不断打断自己。
+          </p>
+        </div>
+
+        <h2 id="events">事件流：用户轮次与智能体回复</h2>
+        <p>
+          <code>reply_stream()</code>
+          <span class="src" data-src="src/agentscope/agent/_realtime/_agent.py:394">_agent.py:394</span>
+          产出的事件与文本 Agent 基本一致，但用户说话也算一次 reply：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>事件</th>
+                <th>含义</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>ReplyStartEvent(role="user")</code></td><td>用户开始说话</td></tr>
+              <tr><td><code>TextBlockDeltaEvent</code></td><td>智能体文本，或用户转写</td></tr>
+              <tr><td><code>DataBlockDeltaEvent</code></td><td>回复音频增量，通常已由传输播放</td></tr>
+              <tr><td><code>ToolCallStartEvent</code> / <code>ToolResultEndEvent</code></td><td>工具调用与结果</td></tr>
+              <tr><td><code>RequireUserConfirmEvent</code></td><td>工具调用需要确认</td></tr>
+              <tr><td><code>ReplyEndEvent</code></td><td>一次回复结束；<code>role</code> 区分双方</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          用 <code>reply_id</code> 归集事件，不要把新事件都追加到最后一条消息：
+          工具调用后的续答与原回复共享同一个逻辑 <code>reply_id</code>。
+        </p>
+
+        <h2 id="barge">打断与截断：用户听到哪里，上下文就保留到哪里</h2>
+        <p>
+          用户在回复播放期间开口，智能体会立即停止播放并取消模型侧回复。
+          关键在「停在哪里」：
+        </p>
+        <ol>
+          <li>传输的 <code>clear_audio()</code> 返回 <code>PlayoutPosition</code>
+            <span class="src" data-src="src/agentscope/realtime/_playout.py:6">_playout.py:6</span>，
+            <code>played_ms</code> 是这条回复实际播放到的毫秒数</li>
+          <li>智能体据此把上下文里的助手消息截到用户真正听到的部分
+            <span class="src" data-src="src/agentscope/agent/_realtime/_agent.py:647">_agent.py:647</span></li>
+          <li>被打断的回复以 <code>finished_reason=interrupted</code> 结束</li>
+          <li>文本块的 <code>TextBlockEndEvent.text</code>
+            <span class="src" data-src="src/agentscope/event/_event.py:192">_event.py:192</span>
+            给出截断后的最终文本</li>
+        </ol>
+        <p>
+          为什么要这么麻烦？因为文本增量比音频先到。用户只听到半句话，
+          但前端可能已经收到整段文字；如果上下文保留完整回复，模型会「以为」用户听完了。
+        </p>
+        <div class="callout warn">
+          <span class="ct">模型侧不一定能截断</span>
+          <p>
+            智能体侧上下文一定会截断，但模型服务端取决于协议：OpenAI Realtime 接受显式截断，
+            Gemini Live 由服务端处理，DashScope 与 xAI 不接受截断指令，
+            模型侧仍保留完整回复。跨模型对比时要考虑这个差异。
+          </p>
+        </div>
+        <p>
+          代码也可以主动打断，例如界面上的停止按钮：
+        </p>
+        <pre><code>async def stop(agent) -&gt; None:
+    await agent.interrupt()</code></pre>
+        <p>
+          <code>interrupt()</code>
+          <span class="src" data-src="src/agentscope/agent/_realtime/_agent.py:541">_agent.py:541</span>
+          等价于发送一个 <code>UserInterruptEvent</code>。
+        </p>
+
+        <h2 id="tools">工具与确认：事件流不暂停</h2>
+        <p>
+          传入 <code>toolkit</code> 后，模型可以在语音对话中调用工具。
+          与文本 Agent 最大的区别是：<strong>确认不会暂停事件流</strong>。
+        </p>
+        <pre><code>from agentscope.event import RequireUserConfirmEvent
+from agentscope.tool import Bash, Read, Toolkit
+
+agent = RealtimeAgent(
+    name="Friday",
+    system_prompt="你是一个中文语音助手。",
+    model=model,
+    toolkit=Toolkit(tools=[Bash(), Read()]),
+)
+
+async def run() -&gt; None:
+    async with agent, transport:
+        async for event in agent.reply_stream(transport):
+            if isinstance(event, RequireUserConfirmEvent):
+                # 把确认请求交给界面，不要在这里阻塞事件流
+                show_confirm_dialog(event)</code></pre>
+        <p>
+          用户做出选择后，用 <code>send()</code>
+          <span class="src" data-src="src/agentscope/agent/_realtime/_agent.py:490">_agent.py:490</span>
+          送回 <code>UserConfirmResultEvent</code>。确认等待超时是 300 秒
+          <span class="src" data-src="src/agentscope/agent/_realtime/_agent.py:1289">_agent.py:1289</span>，
+          超时按拒绝处理。
+        </p>
+        <ul>
+          <li>只有模型卡片标注 <code>supports_tools</code> 的模型才收工具列表</li>
+          <li>工具在智能体侧执行，权限检查与文本 Agent 一致</li>
+          <li>实时语音不支持元工具 / 工具组，工具列表在连接时一次性发送</li>
+        </ul>
+
+        <h2 id="turn">回合检测与 TurnAggregator</h2>
+        <p>
+          「用户什么时候说完了」只能由一方决定：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>模式</th>
+                <th>配置</th>
+                <th>适用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>模型 API 检测</td>
+                <td>不传 <code>vad</code>，用 <code>Parameters.turn_detection</code></td>
+                <td>默认，无需额外模型</td>
+              </tr>
+              <tr>
+                <td>本地 VAD</td>
+                <td>传入 <code>VADBase</code> 实现</td>
+                <td>自定义端点策略，或 API 不提供检测</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <pre><code>from agentscope.realtime import SpeechTransition, VADBase
+
+
+class MyVAD(VADBase):
+    sample_rate = 16000  # 必须与传输的输入采样率一致
+
+    def push(self, pcm: bytes) -&gt; SpeechTransition | None:
+        # 只在说话开始 / 结束的那一块返回 STARTED / ENDED
+        return None
+
+    def reset(self) -&gt; None:
+        # 音频流出现间断（例如重连）时清空内部状态
+        pass</code></pre>
+        <p>
+          不管哪种模式，转写都会先经过 <code>TurnAggregator</code>
+          <span class="src" data-src="src/agentscope/agent/_realtime/_aggregator.py:8">_aggregator.py:8</span>
+          整理：
+        </p>
+        <pre><code>from agentscope.agent import RealtimeAgent, TurnAggregator
+
+agent = RealtimeAgent(
+    name="Friday",
+    system_prompt="你是一个中文语音助手。",
+    model=model,
+    aggregator=TurnAggregator(
+        merge_window_ms=800,
+        backchannels=frozenset({"嗯", "好的"}),
+        min_chars=1,
+    ),
+)</code></pre>
+        <ul>
+          <li><code>merge_window_ms</code>：上一轮结束后多久内的转写并入上一轮，修「停顿被切成两句」</li>
+          <li><code>backchannels</code>：纯应答不构成一轮，语言相关，默认空</li>
+          <li><code>min_chars</code>：短于该长度的转写丢弃</li>
+        </ul>
+
+        <h2 id="reconnect">断线重连：会话超时是常态</h2>
+        <p>
+          各家的实时会话都会主动关闭：DashScope 空闲超时约三分钟，Gemini Live 音频会话上限约
+          15 分钟，OpenAI Realtime 约一小时。智能体把它当正常情况处理：
+        </p>
+        <ul>
+          <li>记录 INFO 日志，保持传输打开</li>
+          <li>用户下一次说话时自动重连，并补发这期间的音频</li>
+          <li>对话历史在 <code>agent.state</code> 中，重连时把此前转写附在系统提示后</li>
+        </ul>
+        <p>
+          <code>supports_history_replay</code>
+          <span class="src" data-src="src/agentscope/realtime/_base.py:43">_base.py:43</span>
+          标明模型是否支持这种历史补发；<code>supports_text_input</code>
+          <span class="src" data-src="src/agentscope/realtime/_base.py:40">_base.py:40</span>
+          标明能不能用 <code>send("文字")</code> 输入。
+        </p>
+        <div class="callout warn">
+          <span class="ct">Qwen-Omni 不接受文本轮次</span>
+          <p>
+            <code>DashScopeRealtimeModel</code> 的
+            <code>supports_text_input=False</code>
+            <span class="src" data-src="src/agentscope/realtime/_dashscope/_model.py:79">_model.py:79</span>，
+            调 <code>send("...")</code> 会抛 <code>NotImplementedError</code>。
+            需要文字输入就换模型，或在界面上隐藏输入框。
+          </p>
+        </div>
+
+        <h2 id="transport">自定义传输：从声卡到浏览器</h2>
+        <p>
+          <code>LocalAudioTransport</code> 只适合本机调试。接浏览器或其他音频源时，
+          继承 <code>TransportBase</code> 实现：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>方法 / 属性</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>start()</code> / <code>close()</code></td><td>打开与关闭设备或连接</td></tr>
+              <tr><td><code>incoming()</code></td><td>产出上行 <code>AudioFrame</code>（PCM16）与控制帧</td></tr>
+              <tr><td><code>send_audio(pcm, item_id)</code></td><td>播放一块模型音频</td></tr>
+              <tr><td><code>clear_audio()</code></td><td>打断时丢弃未播放音频，返回 <code>PlayoutPosition</code></td></tr>
+              <tr><td><code>playout</code></td><td>当前播放位置</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          播放进度统计要尽量靠近扬声器。浏览器里应放在 AudioWorklet，
+          而不是在主线程估算，否则截断位置会偏。
+        </p>
+
+        <h2 id="app">Agent Service 的 WebRTC 接法</h2>
+        <p>
+          官方 realtime 文档说浏览器传输「即将上线」，但 2.0.11 的 Agent Service 已经提供
+          WebRTC 协商端点。路径是：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>端点</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>GET /realtime/models?provider=...</code><span class="src" data-src="src/agentscope/app/_router/_realtime.py:49">_realtime.py:49</span></td><td>列出某凭证支持的实时模型卡片</td></tr>
+              <tr><td><code>GET /realtime/config</code><span class="src" data-src="src/agentscope/app/_router/_realtime.py:69">_realtime.py:69</span></td><td>返回 STUN / TURN 配置</td></tr>
+              <tr><td><code>POST /realtime/sessions/{id}/offer</code><span class="src" data-src="src/agentscope/app/_router/_realtime.py:84">_realtime.py:84</span></td><td>用浏览器 SDP Offer 换 Answer，在已有会话上启动语音</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <pre><code>curl -X POST \
+  "http://localhost:8000/realtime/sessions/session-xxx/offer" \
+  -H "X-User-ID: alice" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "agent-xxx",
+    "sdp": "&lt;浏览器 SDP Offer&gt;",
+    "type": "offer"
+  }'</code></pre>
+        <ul>
+          <li>先给会话设置 <code>realtime_model_config</code>，否则端点会报未配置</li>
+          <li>文字运行与语音不能同时占用同一会话，正在运行时返回 409</li>
+          <li>新的 Offer 会替换旧的实时连接</li>
+          <li><code>turn_detection="none"</code> 会被拒绝，浏览器语音必须由模型 API 做回合检测</li>
+          <li>ICE 服务器通过 <code>create_app(realtime_ice_servers=...)</code>
+            <span class="src" data-src="src/agentscope/app/_app.py:136">_app.py:136</span>
+            或环境变量配置</li>
+        </ul>
+
+        <h2 id="metrics">延迟与成本：语音的隐藏账</h2>
+        <p>
+          <code>RealtimeAgent.last_turn_metrics</code>
+          <span class="src" data-src="src/agentscope/agent/_realtime/_agent.py:546">_agent.py:546</span>
+          给出最近一轮的延迟拆解：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>指标</th>
+                <th>含义</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>endpointing_delay</code><span class="src" data-src="src/agentscope/agent/_realtime/_metrics.py:29">_metrics.py:29</span></td><td>判断「说完了」花了多久</td></tr>
+              <tr><td><code>backend_ttfb</code><span class="src" data-src="src/agentscope/agent/_realtime/_metrics.py:34">_metrics.py:34</span></td><td>模型首字节延迟</td></tr>
+              <tr><td><code>transport_delay</code><span class="src" data-src="src/agentscope/agent/_realtime/_metrics.py:42">_metrics.py:42</span></td><td>音频到扬声器的延迟</td></tr>
+              <tr><td><code>e2e_latency</code><span class="src" data-src="src/agentscope/agent/_realtime/_metrics.py:50">_metrics.py:50</span></td><td>用户停止说话到听到回答</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          成本上，语音比文本贵得多：
+        </p>
+        <ul>
+          <li>PCM16 单声道 16 kHz 约 32 KB/s，24 kHz 约 48 KB/s；一小时通话是 100 MB 级</li>
+          <li>实时模型按音频 token 计费，静音也会占会话时间</li>
+          <li>转写文本会进入上下文，长对话照样触发压缩与 token 成本</li>
+          <li>录音与转写都可能是敏感数据，存储前要脱敏、加密、设保留期</li>
+        </ul>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>安装语音依赖</td><td><code>pip install "agentscope[realtime]"</code></td></tr>
+              <tr><td>文本转语音</td><td><code>tts.synthesize(text)</code></td></tr>
+              <tr><td>流式输入 TTS</td><td><code>async with tts: push(delta); synthesize()</code></td></tr>
+              <tr><td>给文本 Agent 配音</td><td><code>middlewares=[TTSMiddleware(tts)]</code></td></tr>
+              <tr><td>批量转写</td><td><code>asr.transcribe(audio=..., filename=...)</code></td></tr>
+              <tr><td>端到端语音</td><td><code>RealtimeAgent</code> + <code>LocalAudioTransport</code></td></tr>
+              <tr><td>本地 VAD</td><td>传 <code>vad=MyVAD()</code>，同时关闭模型检测</td></tr>
+              <tr><td>主动打断</td><td><code>await agent.interrupt()</code></td></tr>
+              <tr><td>看延迟</td><td><code>agent.last_turn_metrics.e2e_latency</code></td></tr>
+              <tr><td>浏览器接入</td><td>Agent Service 的 <code>/realtime/sessions/{id}/offer</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">把采样率写死</span>
+          <p>
+            不同模型上行采样率不同。写死 16 kHz 接 OpenAI 会变调或失真，
+            永远用模型的 <code>input_sample_rate</code> / <code>output_sample_rate</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">外放导致自我打断</span>
+          <p>
+            本地传输没有回声消除。戴耳机，或换带 AEC 的自定义传输。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">以为打断会把模型侧上下文也截断</span>
+          <p>
+            AgentScope 侧一定截断，模型侧看协议。DashScope 与 xAI 不支持截断指令，
+            模型仍记得完整回复。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">在确认对话框里阻塞事件流</span>
+          <p>
+            <code>RequireUserConfirmEvent</code> 之后事件流还要继续。确认放到界面回调，
+            用 <code>agent.send()</code> 异步送回，别在循环里 <code>input()</code> 死等。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">用 Qwen-Omni 调 <code>send("文字")</code></span>
+          <p>
+            <code>supports_text_input=False</code>，会直接抛
+            <code>NotImplementedError</code>。先查模型能力再渲染输入框。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">把整段文本当用户听到的内容</span>
+          <p>
+            文本增量先于音频到达。打断时必须用 <code>played_ms</code> 截断上下文，
+            并用 <code>TextBlockEndEvent.text</code> 覆盖已经发出的文本。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">文档与源码的小差异</span>
+          <p>
+            realtime 文档提到模型类有 <code>truncation</code> 属性
+            （EXPLICIT / SERVER / NONE），2.0.11 源码里没有这个属性；
+            截断行为写在各模型实现里。以源码与实际模型为准。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li>TTS 标准模式与流式输入模式分别在什么时候调用 <code>synthesize</code> / <code>push</code>？</li>
+          <li>用户打断时，为什么不能直接用已经收到的全部文本作为上下文？</li>
+          <li><code>RealtimeAgent</code> 的模型会话与音频传输为什么要分开管理？</li>
+        </ol>
+
+        <h2 id="exercise">30 分钟动手练习</h2>
+        <ol>
+          <li>用 OpenAI TTS 合成一段中文，保存为 mp3，确认 <code>is_last</code> 行为。</li>
+          <li>用 <code>TTSMiddleware</code> 给第 02 章的文本 Agent 加语音，观察音频事件。</li>
+          <li>用 OpenAI ASR 转写一段录音，对比 <code>language</code> 与 <code>prompt</code> 的影响。</li>
+          <li>跑通 <code>RealtimeAgent</code> + 本地声卡，中途打断，打印 <code>last_turn_metrics</code>。</li>
+          <li>把 <code>LocalAudioTransport</code> 换成一个自定义传输，模拟浏览器上报的播放位置。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          语音让 Agent 走出了聊天框。下一章 <strong>26 综合案例：一个能上线的 Agent 服务</strong>
+          会把模型、工具、权限、记忆、RAG、语音与观测串成一个完整系统。
+          想先复习工具与权限，可以回 <a href="05-tool.html">05 工具系统</a> 和
+          <a href="08-permission-hitl.html">08 权限与 HITL</a>。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
