@@ -2,6 +2,19 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.26.0 — 2026-11-07
+
+新增第 26 章「综合案例：一个可上线的 Agent 服务（附 Java 对照）」，正文完结。
+
+- **Atlas 案例**：多租户、工具、长期记忆、知识库、团队共享、IM 渠道、观测、评测与部署。
+- **装配**：`create_app` 接 RedisStorage / RedisMessageBus / LocalWorkspaceManager / CollectionPerKbManager / hubs / channels / policy / middleware / tools。
+- **工具**：`extra_agent_tools` 按租户注入 `FunctionTool`，只读工具显式 ALLOW。
+- **记忆与 RAG**：`AgenticMemoryMiddleware` 的边界，知识库独立资源与共享。
+- **共享**：`ResourceAccessPolicyBase` 的团队凭证只读与知识库只读。
+- **扩展**：渠道、MCP / 技能中心、语音与 A2A 的按需开关。
+- **上线**：资源初始化顺序、409 单飞、健康检查、三张观测看板、四类评测用例、运行手册。
+- **Java 对照**：Agent 装配、工具、消息块、Reactor vs asyncio、服务形态、状态存储、流式、权限、团队、A2A、部署与迁移四坑。
+
 ## v0.25.0 — 2026-11-07
 
 新增第 25 章「实时语音」，把 TTS、ASR 与端到端语音串起来。

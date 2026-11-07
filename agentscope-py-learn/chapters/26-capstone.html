@@ -1,0 +1,846 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 综合案例 Atlas：create_app 装配、Redis 存储与总线、工作区、知识库、团队共享策略、渠道与中心、TracingMiddleware、成本与审计、上线清单、运行手册，并逐项对照 AgentScope Java 2.0.4。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="26 综合案例：一个可上线的 Agent 服务（附 Java 对照） · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="Atlas 团队知识助手：完整 create_app 装配、工具、记忆、RAG、共享、渠道、观测、上线清单、运行手册与 Java 2.0.4 对照。" />
+    <title>26 综合案例：一个可上线的 Agent 服务（附 Java 对照） · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="26-capstone" data-root="..">
+    <main>
+      <article class="article">
+        <h1>26 · 综合案例</h1>
+        <p class="lede">
+          前面 25 章各讲一块积木。这一章把它们拼成一个真的能上线的服务：
+          <strong>Atlas</strong>，一个面向团队的文档与运维助手。
+          它有多租户、工具、长期记忆、知识库、团队共享、IM 渠道、追踪、评测与部署清单，
+          最后逐项对照 AgentScope Java 2.0.4。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>用一份 <code>create_app</code> 装配出带存储、总线、工作区、知识库与渠道的服务</li>
+          <li>把工具、长期记忆、追踪、共享策略挂到每个聊天回合上</li>
+          <li>按正确顺序初始化凭证、Agent、会话与知识库</li>
+          <li>用上线清单与运行手册判断「能不能发」</li>
+          <li>说清 Python 2.0.11 与 Java 2.0.4 在 Agent、服务、响应式与部署上的差异</li>
+        </ul>
+
+        <h2 id="brief">案例：Atlas 团队知识助手</h2>
+        <p>
+          Atlas 的需求很普通，但几乎覆盖了所有生产问题：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>需求</th>
+                <th>对应能力</th>
+                <th>章节</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>每个用户有自己的 Agent 与会话</td>
+                <td>多租户资源模型</td>
+                <td>15</td>
+              </tr>
+              <tr>
+                <td>回答产品手册里的问题</td>
+                <td>知识库 + RAG</td>
+                <td>11</td>
+              </tr>
+              <tr>
+                <td>能读工作区文件、查内部手册</td>
+                <td>Toolkit + 自定义工具</td>
+                <td>05、12</td>
+              </tr>
+              <tr>
+                <td>写文件前要人工确认</td>
+                <td>权限系统 + HITL</td>
+                <td>08</td>
+              </tr>
+              <tr>
+                <td>记得用户上次说过的偏好</td>
+                <td>Agentic Memory</td>
+                <td>11</td>
+              </tr>
+              <tr>
+                <td>团队共用一份 API 额度</td>
+                <td>资源共享策略</td>
+                <td>20</td>
+              </tr>
+              <tr>
+                <td>在飞书里也能用</td>
+                <td>Channel</td>
+                <td>18</td>
+              </tr>
+              <tr>
+                <td>能看到延迟、token、失败原因</td>
+                <td>Tracing + 成本中间件</td>
+                <td>21</td>
+              </tr>
+              <tr>
+                <td>改 prompt 不退化</td>
+                <td>回归集</td>
+                <td>22</td>
+              </tr>
+              <tr>
+                <td>多副本、能滚动发布</td>
+                <td>Redis + 优雅关闭</td>
+                <td>23</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="architecture">架构：一个进程里有什么</h2>
+        <pre><code>Client / IM / Browser
+        │
+        ▼
+FastAPI (create_app)
+├── 鉴权依赖（替换 X-User-ID）
+├── 会话锁 / 回放 / 唤醒（RedisMessageBus）
+├── ChatService
+│   ├── 组装 Agent
+│   │   ├── 模型（主 + fallback）
+│   │   ├── Toolkit（工作区 + 自定义工具 + MCP）
+│   │   ├── 中间件（Tracing、Memory、Audit）
+│   │   └── 权限（PermissionEngine）
+│   ├── 知识库（CollectionPerKbManager）
+│   └── 事件流（SSE）
+├── Scheduler（单例）
+├── Channel worker（单例）
+└── Health / Metrics</code></pre>
+        <p>
+          这张图里只有 <code>FastAPI</code> 和 <code>ChatService</code> 是进程内代码，
+          其余都是通过 <code>create_app</code> 注入的资源。装配代码集中在 <code>app.py</code>，
+          业务工具与策略拆成独立文件，方便测试与复用。
+        </p>
+
+        <h2 id="wiring">装配：一份 create_app</h2>
+        <p>
+          <code>create_app</code>
+          <span class="src" data-src="src/agentscope/app/_app.py:113">_app.py:113</span>
+          是唯一入口。下面这份 <code>app.py</code> 把存储、总线、工作区、知识库、中心、
+          渠道、共享策略、中间件与工具全部接上：
+        </p>
+        <pre><code>import os
+
+from fastapi.middleware import Middleware
+from fastapi.middleware.cors import CORSMiddleware
+
+from agentscope.app import create_app
+from agentscope.app.hub import ClawSkillHub, GitHubMCPHub
+from agentscope.app.message_bus import RedisMessageBus
+from agentscope.app.rag.knowledge_base_manager import CollectionPerKbManager
+from agentscope.app.storage import RedisStorage
+from agentscope.app.workspace_manager import LocalWorkspaceManager
+from agentscope.middleware import AgenticMemoryMiddleware, TracingMiddleware
+from agentscope.rag import ApproxTokenChunker, QdrantStore
+
+from policy import TeamResourcePolicy
+from tools import build_tools
+
+
+async def build_middlewares(
+    user_id: str,
+    agent_id: str,
+    session_id: str,
+    workspace,
+):
+    return [
+        TracingMiddleware(),
+        AgenticMemoryMiddleware(
+            workdir=workspace.workdir,
+            backend=workspace.get_backend(),
+        ),
+    ]
+
+
+storage = RedisStorage(
+    host=os.environ["REDIS_HOST"],
+    port=int(os.environ.get("REDIS_PORT", "6379")),
+)
+message_bus = RedisMessageBus(
+    host=os.environ["REDIS_HOST"],
+    port=int(os.environ.get("REDIS_PORT", "6379")),
+)
+workspace_manager = LocalWorkspaceManager(
+    basedir="/data/workspaces",
+    ttl=3600.0,
+)
+knowledge_base_manager = CollectionPerKbManager(
+    storage=storage,
+    vector_store=QdrantStore(
+        url=os.environ["QDRANT_URL"],
+        api_key=os.getenv("QDRANT_API_KEY"),
+    ),
+)
+
+app = create_app(
+    storage=storage,
+    message_bus=message_bus,
+    workspace_manager=workspace_manager,
+    knowledge_base_manager=knowledge_base_manager,
+    knowledge_chunkers=[ApproxTokenChunker],
+    mcp_hubs=[GitHubMCPHub()],
+    skill_hubs=[ClawSkillHub()],
+    resource_access_policy=TeamResourcePolicy(),
+    extra_agent_middlewares=build_middlewares,
+    extra_agent_tools=build_tools,
+    extra_middlewares=[
+        Middleware(
+            CORSMiddleware,
+            allow_origins=["https://atlas.example.com"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        ),
+    ],
+    download_secret=os.environ["DOWNLOAD_SECRET"],
+    realtime_ice_servers=[],
+    enable_scheduler=os.getenv("ENABLE_SCHEDULER") == "1",
+    enable_channel_worker=os.getenv("ENABLE_CHANNEL_WORKER") == "1",
+    enable_index_worker=os.getenv("ENABLE_INDEX_WORKER") == "1",
+)</code></pre>
+        <p>
+          几个参数的作用：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>参数</th>
+                <th>作用</th>
+                <th>源码</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>knowledge_base_manager</code></td>
+                <td>启用知识库端点与 RAG 运行时</td>
+                <td><span class="src" data-src="src/agentscope/app/rag/knowledge_base_manager/_collection_per_kb.py:31">_collection_per_kb.py:31</span></td>
+              </tr>
+              <tr>
+                <td><code>mcp_hubs</code> / <code>skill_hubs</code></td>
+                <td>让用户自助安装 MCP 与技能</td>
+                <td>19 章</td>
+              </tr>
+              <tr>
+                <td><code>resource_access_policy</code></td>
+                <td>团队共享凭证 / Agent / 知识库</td>
+                <td>20 章</td>
+              </tr>
+              <tr>
+                <td><code>extra_agent_middlewares</code></td>
+                <td>每回合注入追踪、记忆、审计</td>
+                <td><span class="src" data-src="src/agentscope/app/_service/_chat.py:1015">_chat.py:1015</span></td>
+              </tr>
+              <tr>
+                <td><code>extra_agent_tools</code></td>
+                <td>按租户动态提供工具</td>
+                <td><span class="src" data-src="src/agentscope/app/_app.py:130">_app.py:130</span></td>
+              </tr>
+              <tr>
+                <td><code>download_secret</code></td>
+                <td>多副本共享下载令牌签名</td>
+                <td><span class="src" data-src="src/agentscope/app/_app.py:135">_app.py:135</span></td>
+              </tr>
+              <tr>
+                <td><code>realtime_ice_servers</code></td>
+                <td>浏览器语音的 STUN / TURN</td>
+                <td><span class="src" data-src="src/agentscope/app/_app.py:136">_app.py:136</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="tools">工具：只给该给的人</h2>
+        <p>
+          <code>extra_agent_tools</code> 在每次组装 Agent 时被调用，签名是
+          <code>(user_id, agent_id, session_id)</code>。用它按租户注入工具，
+          比把所有工具塞进全局 Toolkit 安全得多。
+        </p>
+        <pre><code>from agentscope.permission import PermissionBehavior, PermissionDecision
+from agentscope.tool import FunctionTool
+
+
+def build_tools(user_id: str, agent_id: str, session_id: str):
+    allow_read = PermissionDecision(
+        behavior=PermissionBehavior.ALLOW,
+        decision_reason="handbook is read-only",
+        message="allowed",
+    )
+
+    async def search_handbook(query: str) -&gt; str:
+        """Search the team handbook and return relevant passages."""
+        # 这里换成你的检索服务，并按 user_id 做权限过滤
+        return f"[{user_id}] results for: {query}"
+
+    return [
+        FunctionTool(
+            search_handbook,
+            permission=allow_read,
+            is_read_only=True,
+        ),
+    ]</code></pre>
+        <div class="callout warn">
+          <span class="ct">工具描述就是提示词</span>
+          <p>
+            <code>FunctionTool</code> 从函数签名与 docstring 生成 schema。
+            参数名、类型、docstring 写得含糊，模型就会乱传参。
+            工具描述要和系统提示一起 review。
+          </p>
+        </div>
+        <p>
+          写操作不要给 <code>ALLOW</code>。用 <code>ASK</code> 或权限模式限制，
+          让第 08 章的确认流程接管；有副作用的工具还应该配沙箱工作区。
+        </p>
+
+        <h2 id="memory-rag">记忆与知识库：一个存偏好，一个存事实</h2>
+        <p>
+          这两件事经常被混在一起：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>能力</th>
+                <th>存什么</th>
+                <th>实现</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>长期记忆</td>
+                <td>用户偏好、上次结论、跨会话事实</td>
+                <td><code>AgenticMemoryMiddleware</code><span class="src" data-src="src/agentscope/middleware/_longterm_memory/_agentic_memory/_middleware.py:359">_middleware.py:359</span></td>
+              </tr>
+              <tr>
+                <td>知识库</td>
+                <td>产品手册、政策、工单等可检索文档</td>
+                <td><code>CollectionPerKbManager</code> + <code>KnowledgeBase</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          记忆放在工作区里，跟随 Agent 的隔离策略；知识库是独立资源，可以被共享。
+          不要在记忆里重复存整份手册，也不要把用户偏好塞进知识库。
+        </p>
+
+        <h2 id="access">共享：团队额度与只读边界</h2>
+        <p>
+          Atlas 里 alice 是管理员，她配置的 OpenAI 凭证供团队使用，但成员不能看到 key。
+          这正是第 20 章的 <code>ResourceAccessPolicyBase</code>：
+        </p>
+        <pre><code>from agentscope.app.access import (
+    ResourceAccessPolicyBase,
+    ResourceKind,
+    ResourcePermission,
+    ResourceRef,
+)
+
+# 生产环境从 IAM / 数据库查询，这里用常量演示
+GRANTS = {
+    ("bob", ResourceKind.CREDENTIAL): [
+        ("alice", "cred-openai-prod", ResourcePermission.READ),
+    ],
+    ("carol", ResourceKind.KNOWLEDGE_BASE): [
+        ("alice", "kb-handbook", ResourcePermission.READ),
+    ],
+}
+
+
+class TeamResourcePolicy(ResourceAccessPolicyBase):
+    async def list_accessible(self, viewer_id, kind, storage):
+        return [
+            ResourceRef(
+                kind=kind,
+                owner_id=owner_id,
+                resource_id=resource_id,
+                permission=permission,
+            )
+            for owner_id, resource_id, permission in GRANTS.get(
+                (viewer_id, kind),
+                [],
+            )
+        ]</code></pre>
+        <ul>
+          <li>凭证共享只给「使用能力」，任何列表 / 详情都不会返回 key</li>
+          <li>知识库 <code>READ</code> 可以检索，<code>EDIT</code> 才能改文档</li>
+          <li>共享 Agent 只共享配置，不共享工作区、MCP、技能与记忆</li>
+          <li><code>list_accessible</code> 只返回跨属主资源，自己的资源由服务合并</li>
+        </ul>
+
+        <h2 id="channels">渠道与中心：让用户自助扩展</h2>
+        <p>
+          渠道把 Agent 放进飞书 / 钉钉 / Discord；中心让用户自己装 MCP 与技能。
+          两者都是「用户不经过你的代码就能扩展能力」。
+        </p>
+        <ul>
+          <li><code>channels=[FeishuChannel, DingTalkChannel]</code> 注册适配器</li>
+          <li>长连接只允许一个进程持有：<code>enable_channel_worker</code> 只在一个副本为真</li>
+          <li><code>mcp_hubs=[GitHubMCPHub()]</code> 让用户浏览并安装 MCP</li>
+          <li><code>skill_hubs=[ClawSkillHub()]</code> 让用户安装技能</li>
+          <li>安装 ≠ 装配：装进资源池后，还要在工作区里装配给某个 Agent</li>
+        </ul>
+        <div class="callout tip">
+          <span class="ct">渠道与 Web 共用同一套会话</span>
+          <p>
+            渠道消息最终也走 <code>ChatService</code>，所以权限、记忆、追踪、预算对两边一致。
+            不需要为 IM 单独写一套 Agent 逻辑。
+          </p>
+        </div>
+
+        <h2 id="realtime-a2a">语音与 A2A：按需开启，不要默认全开</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>能力</th>
+                <th>开启方式</th>
+                <th>代价</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>浏览器语音</td>
+                <td>配置 <code>realtime_ice_servers</code>，走 <code>/realtime/sessions/{id}/offer</code></td>
+                <td>带宽、音频 token、TURN 成本</td>
+              </tr>
+              <tr>
+                <td>TTS 播报</td>
+                <td>给 Agent 加 <code>TTSMiddleware</code></td>
+                <td>首字延迟、TTS 费用</td>
+              </tr>
+              <tr>
+                <td>A2A 客户端</td>
+                <td>安装 <code>agentscope[a2a]</code>，用 <code>A2AAgent</code></td>
+                <td>外部依赖、跨组织信任</td>
+              </tr>
+              <tr>
+                <td>A2A 服务端</td>
+                <td>官方 <code>a2a-sdk</code> + <code>AgentExecutor</code></td>
+                <td>额外的鉴权、限流、TaskStore</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Atlas 默认只开文本与手册检索；语音和 A2A 作为独立开关，
+          先在小范围用户上验证，再放量。
+        </p>
+
+        <h2 id="provision">上线前：按顺序初始化资源</h2>
+        <p>
+          Agent Service 是资源驱动的：没有凭证和 Agent，会话无从创建。
+          推荐顺序如下：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>步骤</th>
+                <th>端点</th>
+                <th>注意</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>1. 建凭证</td>
+                <td><code>GET /credential/schemas</code> → <code>POST /credential</code></td>
+                <td>前端按 schema 渲染，密钥加密保存</td>
+              </tr>
+              <tr>
+                <td>2. 建 Agent 模板</td>
+                <td><code>GET /agent/schema/v2</code> → <code>POST /agent</code></td>
+                <td>系统提示、context / ReAct 配置</td>
+              </tr>
+              <tr>
+                <td>3. 建会话</td>
+                <td><code>POST /sessions</code></td>
+                <td>绑定 agent_id、credential_id 与模型</td>
+              </tr>
+              <tr>
+                <td>4. 建知识库</td>
+                <td><code>POST /knowledge_bases</code> → 上传文档</td>
+                <td>等索引状态变成可用再检索</td>
+              </tr>
+              <tr>
+                <td>5. 装配 MCP / 技能</td>
+                <td><code>POST /workspace/mcp</code> / <code>POST /workspace/skill</code></td>
+                <td>安装只是进资源池，装配才生效</td>
+              </tr>
+              <tr>
+                <td>6. 开始对话</td>
+                <td><code>POST /chat</code></td>
+                <td>立即返回 <code>started</code><span class="src" data-src="src/agentscope/app/_router/_chat.py:136">_chat.py:136</span></td>
+              </tr>
+              <tr>
+                <td>7. 订阅事件</td>
+                <td><code>GET /sessions/{id}/stream</code></td>
+                <td>后接入会先收到回放再收实时</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          重复提交同一会话的 <code>/chat</code> 会得到 <strong>409</strong>
+          <span class="src" data-src="src/agentscope/app/_router/_chat.py:154">_chat.py:154</span>，
+          因为同一会话只允许一个在途 run。前端应显示「正在回答」，而不是重试。
+        </p>
+
+        <h2 id="observe">观测：三张图就能定位大多数问题</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>看板</th>
+                <th>指标</th>
+                <th>能回答</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>请求</td>
+                <td>QPS、P95、409、429、5xx</td>
+                <td>服务是否健康、是否被打爆</td>
+              </tr>
+              <tr>
+                <td>Agent</td>
+                <td>span 树、工具成功率、fallback 比例、迭代轮次</td>
+                <td>慢在哪、哪一步失败</td>
+              </tr>
+              <tr>
+                <td>成本</td>
+                <td>token / 租户、缓存命中、TTS 分钟数、语音带宽</td>
+                <td>钱花在哪、谁在超支</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <code>TracingMiddleware</code> 放在中间件列表第一位；
+          成本统计从 <code>ModelCallEndEvent</code> 累计；审计日志在
+          <code>extra_agent_middlewares</code> 里再加一个轻量中间件即可。
+        </p>
+        <p>
+          <code>GET /health</code>
+          <span class="src" data-src="src/agentscope/app/_router/_health.py:34">_health.py:34</span>
+          检查组件是否挂好；它不做 I/O，但需要身份头。liveness 用单独的
+          <code>/livez</code> 更稳。
+        </p>
+
+        <h2 id="eval">评测：上线前的最后一道门</h2>
+        <p>
+          Atlas 至少要有四类用例：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>类型</th>
+                <th>怎么测</th>
+                <th>跑在什么时候</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>工具契约</td>
+                <td>假模型脚本 + 事件断言</td>
+                <td>每个 PR</td>
+              </tr>
+              <tr>
+                <td>检索质量</td>
+                <td>recall@k / MRR，固定问题集</td>
+                <td>每个 PR（不需要模型）</td>
+              </tr>
+              <tr>
+                <td>回答质量</td>
+                <td>关键事实断言 + 少量裁判</td>
+                <td>夜间</td>
+              </tr>
+              <tr>
+                <td>端到端冒烟</td>
+                <td>真实模型 + 真实知识库，20 条</td>
+                <td>发布前</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <pre><code>pytest tests/unit tests/replay -q</code></pre>
+        <p>
+          发布门禁只看两个数：<strong>通过率不低于基线</strong>，
+          <strong>单次评测成本不超过预算</strong>。只盯通过率会纵容成本膨胀，
+          只盯成本会砍掉该测的样本。
+        </p>
+
+        <h2 id="runbook">运行手册：先看现象，再看层</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>现象</th>
+                <th>先查</th>
+                <th>处理</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>401</td>
+                <td>鉴权依赖、凭证是否共享</td>
+                <td>换 token；检查 <code>resource_access_policy</code></td>
+              </tr>
+              <tr>
+                <td>409</td>
+                <td>会话是否已有在途 run</td>
+                <td>等待、订阅事件，或调用 interrupt</td>
+              </tr>
+              <tr>
+                <td>429</td>
+                <td>网关配额、provider 限流</td>
+                <td>退避、提高配额、切 fallback</td>
+              </tr>
+              <tr>
+                <td>503 <code>/health</code></td>
+                <td>哪个组件 <code>not_ready</code></td>
+                <td>检查 Redis / 存储 / 工作区初始化</td>
+              </tr>
+              <tr>
+                <td>工具迟迟不返回</td>
+                <td>是否被卸载到后台</td>
+                <td>查后台任务与收件箱，不要重复触发</td>
+              </tr>
+              <tr>
+                <td>fallback 比例升高</td>
+                <td>主模型错误率与延迟</td>
+                <td>修主模型配置，别长期靠备用</td>
+              </tr>
+              <tr>
+                <td>索引队列积压</td>
+                <td>index worker 是否在跑</td>
+                <td>扩容 worker 或检查 blob store</td>
+              </tr>
+              <tr>
+                <td>成本突增</td>
+                <td>迭代轮次、上下文、TTS/语音</td>
+                <td>降 <code>max_iters</code>、开预算、查异常租户</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          这份手册要跟告警绑在一起：告警里直接写「先查哪一行」，
+          比写「请联系管理员」有用得多。
+        </p>
+
+        <h2 id="java">附：AgentScope Java 2.0.4 对照</h2>
+        <p>
+          两个版本概念相近，但工程形态不同。把同一件事放在一起看：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>维度</th>
+                <th>AgentScope Java 2.0.4</th>
+                <th>AgentScope Python 2.0.11</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>第一个 Agent</td>
+                <td><code>HarnessAgent.builder()</code></td>
+                <td><code>Agent(...)</code> 或 <code>create_app</code> 的资源模型</td>
+              </tr>
+              <tr>
+                <td>工具</td>
+                <td><code>@Tool</code> 注解 + <code>Toolkit</code></td>
+                <td><code>FunctionTool</code> / <code>ToolBase</code> + <code>Toolkit</code></td>
+              </tr>
+              <tr>
+                <td>消息块</td>
+                <td><code>ToolUseBlock</code></td>
+                <td><code>ToolCallBlock</code></td>
+              </tr>
+              <tr>
+                <td>异步模型</td>
+                <td>Reactor <code>Mono</code> / <code>Flux</code></td>
+                <td><code>asyncio</code> + <code>AsyncGenerator</code></td>
+              </tr>
+              <tr>
+                <td>服务形态</td>
+                <td><code>agentscope-service</code> 网关 + 运行时 + PostgreSQL</td>
+                <td><code>create_app</code> 一体的 FastAPI 服务</td>
+              </tr>
+              <tr>
+                <td>状态存储</td>
+                <td>Service 存储 / <code>AgentState</code> 落盘</td>
+                <td><code>StorageBase</code>（Redis / SQL）+ <code>AgentState</code></td>
+              </tr>
+              <tr>
+                <td>流式接口</td>
+                <td><code>streamEvents()</code> 的 Reactor 流</td>
+                <td><code>reply_stream()</code> 的异步迭代器 / SSE</td>
+              </tr>
+              <tr>
+                <td>权限与 HITL</td>
+                <td>权限系统 + 用户确认</td>
+                <td><code>PermissionEngine</code> + <code>RequireUserConfirmEvent</code></td>
+              </tr>
+              <tr>
+                <td>团队</td>
+                <td>Team 协议 / Leader-worker</td>
+                <td><code>TeamPipeline</code> / 团队工具</td>
+              </tr>
+              <tr>
+                <td>A2A</td>
+                <td>协议扩展</td>
+                <td><code>A2AAgent</code> + 官方 a2a-sdk 服务端</td>
+              </tr>
+              <tr>
+                <td>部署</td>
+                <td>Compose / K8s / PostgreSQL</td>
+                <td>Docker / uvicorn / Redis 或 SQL</td>
+              </tr>
+              <tr>
+                <td>观测</td>
+                <td>按接入的 OTel / 日志方案</td>
+                <td>内建 <code>TracingMiddleware</code> 与 token 事件</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>迁移时最容易踩的四个坑</h3>
+        <ol>
+          <li><strong>不要照搬 Java Service 的拆分</strong>：Python 的 <code>create_app</code> 已经把网关、存储、会话、SSE 放在一起，先跑通单体，再按需要拆 worker。</li>
+          <li><strong>Reactor 不是 asyncio</strong>：<code>Flux</code> 的背压与取消语义，对应到 Python 是异步生成器的消费与 <code>aclose</code>，不能机械翻译。</li>
+          <li><strong>工具注解不同</strong>：Java 的 <code>@Tool</code> 对应 Python 的 <code>FunctionTool</code> 或 <code>ToolBase</code> 子类，schema 生成规则也不同。</li>
+          <li><strong>服务存储不同</strong>：Java Service 依赖 PostgreSQL 与 Go 网关；Python 侧选 Redis 或 SQLAlchemy，迁移脚本与备份策略要重做。</li>
+        </ol>
+        <p>
+          Java 站第 11 章的「笔记 Agent」是 SDK 级综合案例，第 19–26 章才是服务与运维；
+          Python 站把两者合在 15–26 章。读的时候按「SDK → 服务 → 运维」三段对照，
+          不要按章节号硬对齐。
+        </p>
+
+        <h2 id="cheatsheet">上线清单</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>检查项</th>
+                <th>标准</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>鉴权</td><td>已替换 <code>X-User-ID</code>，对接 JWT / OAuth</td></tr>
+              <tr><td>存储</td><td>Redis 或 SQL 已开持久化与备份</td></tr>
+              <tr><td>总线</td><td>多副本使用 <code>RedisMessageBus</code></td></tr>
+              <tr><td>下载</td><td><code>download_secret</code> 全局共享</td></tr>
+              <tr><td>单例角色</td><td>scheduler / channel worker 各只有一个进程</td></tr>
+              <tr><td>健康检查</td><td>readiness 用 <code>/health</code>，liveness 独立</td></tr>
+              <tr><td>追踪</td><td><code>TracingMiddleware</code> + OTLP 已接</td></tr>
+              <tr><td>成本</td><td>按租户出 token / TTS 报表，设日预算</td></tr>
+              <tr><td>评测</td><td>PR 跑 unit + replay，夜间跑真实模型</td></tr>
+              <tr><td>回滚</td><td>镜像版本钉死，存储迁移可回退</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">把 Atlas 当成一个巨型 Agent</span>
+          <p>
+            一个 Agent 塞进所有工具、所有知识库、所有权限，最后谁都管不清。
+            按职责拆 Agent 模板，用团队 / 子 Agent 组合。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">用记忆存手册</span>
+          <p>
+            记忆是用户偏好与结论，知识库是可检索事实。混用会让上下文膨胀，
+            而且共享与更新都变难。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">共享凭证时顺手共享工作区</span>
+          <p>
+            共享 Agent 只共享配置，工作区、MCP、技能、记忆都不跟过去。
+            需要共享知识就共享知识库，不要共享别人的工作区。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">所有能力默认开启</span>
+          <p>
+            语音、A2A、渠道、中心都会增加攻击面与成本。做成开关，按租户灰度，
+            默认只开文本与检索。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">上线只看 demo</span>
+          <p>
+            demo 能跑不代表能上线。至少过一遍本章的上线清单、运行手册与回归集。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">先单体，后拆分</span>
+          <p>
+            <code>create_app</code> 的多副本已经够大多数团队用。真的需要独立索引、
+            渠道或调度 worker 时再拆，不要一开始就上微服务。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li>Atlas 的凭证、Agent、会话、知识库分别由谁创建？初始化顺序为什么不能反？</li>
+          <li>为什么长期记忆和知识库不能混在一起？共享时它们的边界有什么不同？</li>
+          <li>Python 2.0.11 与 Java 2.0.4 的服务形态最大的差异是什么？迁移时先改哪一层？</li>
+        </ol>
+
+        <h2 id="exercise">60 分钟毕业练习</h2>
+        <ol>
+          <li>把 <code>app.py</code> 跑起来，用 <code>/health</code> 确认所有组件 <code>ok</code>。</li>
+          <li>按顺序建凭证、Agent、会话，发一条 <code>/chat</code> 并订阅 SSE。</li>
+          <li>上传一份手册到知识库，问一个只有手册里才有答案的问题。</li>
+          <li>给 alice 的凭证加一条共享给 bob 的策略，确认 bob 能用但看不到 key。</li>
+          <li>加一个 <code>TracingMiddleware</code>，在 Jaeger / Tempo 里找到这次 reply 的 span 树。</li>
+          <li>写 3 条假模型回归用例 + 1 条真实模型冒烟，接进 CI。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          正文到此结束。接下来是附录：
+          <strong>A 术语表</strong>、<strong>B API 速查</strong>、
+          <strong>C 常见错误码</strong>、<strong>D 从 Java 迁移</strong>、
+          <strong>E 源码索引</strong>、<strong>F 延伸阅读</strong>。
+          想先回顾服务全貌，可以回到 <a href="15-agent-service.html">15 Agent Service</a>，
+          或从 <a href="00-study-map.html">00 学习地图</a> 重新规划路线。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
