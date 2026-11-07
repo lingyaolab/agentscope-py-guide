@@ -2,6 +2,21 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.24.0 — 2026-11-07
+
+新增第 24 章「A2A 协议」，讲清楚 Agent 之间怎么互相调用。
+
+- **定位**：MCP 是 Agent 用工具，A2A 是 Agent 找 Agent；核心包只提供客户端适配器。
+- **Agent Card**：`A2ACardResolver`、`supported_interfaces`、`capabilities.streaming` 与卡片投毒风险。
+- **连接**：`A2AAgent` 自建 JSONRPC / HTTP+JSON 流式客户端，也可注入自定义 `client`；单次使用、关闭不可重开。
+- **标识**：`context_id` 对应远端会话，`task_id` 对应执行单元；等待输入才保留，仍在运行则抛错。
+- **载荷**：Message / ArtifactUpdate / StatusUpdate / Task 四种转译及其对 `task_id` 的影响。
+- **内容**：只支持文本、raw、URL Part；工具/思考/hint/结构化数据不支持。
+- **结束**：COMPLETED / INPUT_REQUIRED / AUTH_REQUIRED / CANCELED / FAILED 的 `finished_reason` 映射。
+- **状态**：`A2AAgentState` 四字段，`context_id` 必存，`task_id` 只在等待输入时续接。
+- **服务端**：官方 `a2a-sdk` + `AgentExecutor` + `TaskUpdater`，Task 先入队、Artifact 分块、最后 `complete()`。
+- **生产**：多副本内存 Agent 字典、TaskStore 持久化、超时重发与幂等、安全边界。
+
 ## v0.23.0 — 2026-11-07
 
 新增第 23 章「生产化」，把上线前的失败模式逐层补齐。

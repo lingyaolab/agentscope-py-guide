@@ -1,0 +1,807 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 A2A 协议：A2AAgent 客户端、Agent Card、context_id 与 task_id、Message/Artifact/Status/Task 转译、内容 Part 限制、结束原因映射、A2AAgentState 续接、官方 a2a-sdk 服务端与生产注意事项。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="24 A2A 协议：和外部 Agent 对话 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="A2AAgent、Agent Card、context_id/task_id、载荷转译、内容限制、状态续接、a2a-sdk 服务端与安全边界。" />
+    <title>24 A2A 协议：和外部 Agent 对话 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="24-a2a" data-root="..">
+    <main>
+      <article class="article">
+        <h1>24 · A2A 协议</h1>
+        <p class="lede">
+          前 23 章都在讲「自己家的 Agent 怎么跑」。但真实系统里，Agent 往往由不同团队、
+          不同框架、甚至不同公司提供。A2A（Agent2Agent）就是让它们互相说话的最小协议。
+          这一章讲 AgentScope 的 <code>A2AAgent</code> 怎么接远端，以及怎么把自己暴露出去。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>用 <code>A2ACardResolver</code> 取回 Agent Card 并创建 <code>A2AAgent</code></li>
+          <li>分清 <code>context_id</code> 与 <code>task_id</code>，知道什么时候会续接 Task</li>
+          <li>看懂 Message / Artifact / Status / Task 四种载荷的转译与结束原因</li>
+          <li>用 <code>A2AAgentState</code> 持久化并续接一段远端会话</li>
+          <li>用官方 <code>a2a-sdk</code> 把 AgentScope Agent 暴露成 A2A 服务端</li>
+        </ul>
+
+        <h2 id="why">先说为什么：为什么不用 HTTP 包一层</h2>
+        <p>
+          你当然可以自己定一套 HTTP JSON：<code>POST /chat</code>，返回一段文本。
+          但一旦要跨团队，问题就来了：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>自己包 HTTP</th>
+                <th>A2A</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>对方怎么发现你的能力？</td>
+                <td>Agent Card 自描述：名称、能力、传输方式、技能</td>
+              </tr>
+              <tr>
+                <td>流式输出怎么表达？</td>
+                <td>Artifact 分块 + <code>append</code> / <code>last_chunk</code></td>
+              </tr>
+              <tr>
+                <td>多轮会话怎么串？</td>
+                <td><code>context_id</code></td>
+              </tr>
+              <tr>
+                <td>远端要你补充信息怎么办？</td>
+                <td>Task 状态 <code>INPUT_REQUIRED</code></td>
+              </tr>
+              <tr>
+                <td>换框架还能互通吗？</td>
+                <td>按 A2A 1.0 规范，官方 SDK 还兼容 0.3</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          A2A 不替代 MCP：<strong>MCP 是 Agent 用工具，A2A 是 Agent 找 Agent</strong>。
+          一个是纵向接能力，一个是横向接协作。
+        </p>
+
+        <h2 id="card">Agent Card：远端的自描述</h2>
+        <p>
+          Agent Card 是一份放在固定地址上的 JSON，告诉客户端：我是谁、支持什么传输、
+          能不能流式、有哪些技能。客户端先取卡片，再决定怎么连。
+        </p>
+        <pre><code>{
+  "name": "Friday",
+  "description": "An AgentScope assistant exposed over A2A 1.0.",
+  "version": "1.0.0",
+  "supportedInterfaces": [
+    {
+      "url": "http://127.0.0.1:9999",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "capabilities": {"streaming": true},
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "skills": [
+    {
+      "id": "chat",
+      "name": "Chat",
+      "description": "Answer questions in a multi-turn conversation.",
+      "tags": ["chat"]
+    }
+  ]
+}</code></pre>
+        <p>
+          卡片里的 <code>name</code> 会成为 <code>A2AAgent.name</code>；
+          <code>capabilities.streaming</code> 决定能不能走流式；
+          <code>supportedInterfaces</code> 决定传输绑定。
+        </p>
+        <div class="callout warn">
+          <span class="ct">卡片是远端写的，不是可信配置</span>
+          <p>
+            名称、描述、技能都会进入你的界面甚至提示词。把它当外部输入处理：
+            展示前转义、不要直接拼进系统提示、对 URL 做 allowlist。
+          </p>
+        </div>
+
+        <h2 id="connect">连接：解析卡片并创建 A2AAgent</h2>
+        <p>
+          A2A 支持在可选依赖里，装它：
+        </p>
+        <pre><code>pip install "agentscope[a2a]"</code></pre>
+        <p>
+          对应的 extra 是 <code>a2a-sdk&gt;=1.1.1</code>
+          <span class="src" data-src="pyproject.toml:124">pyproject.toml:124</span>。
+          没装时创建 <code>A2AAgent</code> 会直接提示安装命令
+          <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:235">_a2a_agent.py:235</span>。
+        </p>
+        <pre><code>import httpx
+from a2a.client import A2ACardResolver
+
+from agentscope.agent import A2AAgent
+from agentscope.console import ConsoleRenderer
+from agentscope.message import UserMsg
+
+
+async def main() -&gt; None:
+    async with httpx.AsyncClient() as http:
+        card = await A2ACardResolver(
+            httpx_client=http,
+            base_url="http://127.0.0.1:9999",
+        ).get_agent_card()
+
+    renderer = ConsoleRenderer()
+    async with A2AAgent(card) as remote:
+        async for event in remote.reply_stream(
+            UserMsg(name="user", content="帮我规划一个杭州周末行程。"),
+        ):
+            renderer.render(event)
+
+        print(renderer.last_msg.get_text_content())</code></pre>
+        <p>
+          不传 <code>client</code> 时，<code>A2AAgent</code> 会按卡片自建一个流式客户端，
+          要求对方提供 <code>JSONRPC</code> 或 <code>HTTP+JSON</code> 接口
+          <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:245">_a2a_agent.py:245</span>。
+          需要 gRPC 或自定义鉴权时，自己构造官方 SDK 客户端，用关键字参数传进去。
+        </p>
+        <p>
+          <code>A2AAgent</code>
+          <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:189">_a2a_agent.py:189</span>
+          刻意不继承 <code>Agent</code>：它没有模型、工具、权限和推理循环，
+          只持有远端会话与 Task。接口对齐，但语义不同。
+        </p>
+        <div class="callout warn">
+          <span class="ct">一个实例只服务一段对话，关闭后不能重开</span>
+          <p>
+            <code>A2AAgent</code> 自己持有 A2A 客户端，并在 <code>aclose()</code> 里关闭
+            <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:277">_a2a_agent.py:277</span>。
+            要开新会话，重新创建实例。
+          </p>
+        </div>
+
+        <h2 id="ids">context_id 与 task_id：最容易混淆的两个标识</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>标识</th>
+                <th>含义</th>
+                <th>AgentScope 侧</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>context_id</code></td>
+                <td>远端的一段会话</td>
+                <td>相当于 <code>session_id</code>，多次 <code>reply()</code> 自动携带</td>
+              </tr>
+              <tr>
+                <td><code>task_id</code></td>
+                <td>远端的一次执行单元</td>
+                <td><strong>不等于一次 reply</strong>：可能跨多个 Task，也可能续上旧 Task</td>
+              </tr>
+              <tr>
+                <td><code>session_id</code></td>
+                <td>本地事件分组用</td>
+                <td>只属于适配器，与远端无关</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          三者都在 <code>A2AAgentState</code> 里
+          <span class="src" data-src="src/agentscope/state/_a2a_state.py:10">_a2a_state.py:10</span>。
+          <code>task_id</code> 只在远端等待输入时保留
+          <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:179">_a2a_agent.py:179</span>；
+          下一条消息会续上它，否则在同一 <code>context_id</code> 内开新 Task。
+        </p>
+        <p>
+          发送前如果本地还记着 <code>task_id</code>，适配器会先向远端查这个 Task：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>远端状态</th>
+                <th>适配器行为</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>仍在 <code>SUBMITTED</code> / <code>WORKING</code></td>
+                <td>直接抛 <code>RuntimeError</code>，因为再发会让它重复执行
+                  <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:392">_a2a_agent.py:392</span></td>
+              </tr>
+              <tr>
+                <td><code>INPUT_REQUIRED</code> / <code>AUTH_REQUIRED</code></td>
+                <td>保留 <code>task_id</code>，下一条消息续接</td>
+              </tr>
+              <tr>
+                <td>其他终态</td>
+                <td>清空 <code>task_id</code>，开新 Task</td>
+              </tr>
+              <tr>
+                <td>远端已忘记（<code>TaskNotFoundError</code>）</td>
+                <td>清空 <code>task_id</code>，降级为新 Task</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          这就是为什么「重试一次 <code>reply()</code>」并不总是安全：如果远端还在跑，
+          第二次发送会被拒绝；如果远端已经完成，第二次发送会开新 Task。
+        </p>
+
+        <h2 id="payloads">四种响应载荷怎么转译</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>A2A 载荷</th>
+                <th>转译</th>
+                <th>对 <code>task_id</code> 的影响</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>Message</code></td>
+                <td>Parts 转内容；这是一次不产生 Task 的直接回答</td>
+                <td>清空</td>
+              </tr>
+              <tr>
+                <td><code>TaskArtifactUpdateEvent</code></td>
+                <td>制品 Parts 转内容，<code>append</code> / <code>last_chunk</code> 决定文本块是否续写</td>
+                <td>不影响</td>
+              </tr>
+              <tr>
+                <td><code>TaskStatusUpdateEvent</code></td>
+                <td>状态消息 Parts 转内容，同时决定结束原因</td>
+                <td>等待输入时保留，否则清空</td>
+              </tr>
+              <tr>
+                <td><code>Task</code></td>
+                <td>完整快照：先全部制品，再状态消息</td>
+                <td>同上</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          载荷分派在
+          <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:324">_a2a_agent.py:324</span>。
+          最终消息的 <code>metadata["a2a"]</code> 记录 <code>context_id</code>；
+          块结束事件的 metadata 记录它来自哪个 <code>task_id</code> / <code>artifact_id</code> /
+          <code>message_id</code>，排障时很有用。
+        </p>
+
+        <h2 id="parts">内容 Part：只支持文本、字节与 URL</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>A2A Part</th>
+                <th>AgentScope 块</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>文本 Part</td>
+                <td><code>TextBlock</code></td>
+                <td>同一批连续文本流入同一个块</td>
+              </tr>
+              <tr>
+                <td><code>raw</code> 字节 Part</td>
+                <td><code>DataBlock</code></td>
+                <td>字节以 base64 承载</td>
+              </tr>
+              <tr>
+                <td><code>url</code> Part</td>
+                <td><code>DataBlock</code></td>
+                <td>保留原始 URL</td>
+              </tr>
+              <tr>
+                <td>结构化数据 Part</td>
+                <td>不支持</td>
+                <td>抛 <code>ValueError</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          发送方向也一样：只接受 <code>TextBlock</code> 与 <code>DataBlock</code>，
+          其他块类型直接抛 <code>TypeError</code>
+          <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:550">_a2a_agent.py:550</span>。
+          所以不要把带工具调用、思考块或 hint 的消息直接发给 A2AAgent。
+        </p>
+
+        <h2 id="finish">结束原因：远端挂起，本地不挂起</h2>
+        <p>
+          这是 A2A 与本地 Agent 最大的语义差异：远端 Task 可能停在
+          <code>INPUT_REQUIRED</code>，但本地没有任何东西被挂起。
+          因此<strong>每一次响应流结束都意味着本次 reply 结束</strong>，
+          只是结束原因不同：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>远端 Task 状态</th>
+                <th><code>finished_reason</code></th>
+                <th>下一步</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>COMPLETED</code></td>
+                <td><code>COMPLETED</code></td>
+                <td>可以开新话题</td>
+              </tr>
+              <tr>
+                <td><code>INPUT_REQUIRED</code> / <code>AUTH_REQUIRED</code></td>
+                <td><code>COMPLETED</code></td>
+                <td>状态消息就是远端的问题，用下一次 <code>reply()</code> 回答</td>
+              </tr>
+              <tr>
+                <td><code>CANCELED</code></td>
+                <td><code>INTERRUPTED</code></td>
+                <td>任务被取消</td>
+              </tr>
+              <tr>
+                <td><code>FAILED</code> / <code>REJECTED</code></td>
+                <td><code>ERROR</code></td>
+                <td>失败或被拒绝</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          映射在
+          <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:157">_a2a_agent.py:157</span>。
+          注意 <code>INPUT_REQUIRED</code> 在本地是「正常完成」，
+          不是 HITL 暂停；要回答远端的问题，直接再调一次 <code>reply()</code>。
+        </p>
+        <div class="callout warn">
+          <span class="ct"><code>AUTH_REQUIRED</code> 不能在本适配器里批准</span>
+          <p>
+            A2A 的凭据走协议之外。适配器只会把状态消息当普通内容返回，
+            不会提供授权入口；需要按消息里的指引在外部完成。
+          </p>
+        </div>
+
+        <h2 id="state">状态持久化：续接一段远端会话</h2>
+        <p>
+          <code>A2AAgentState</code> 只有四个字段
+          <span class="src" data-src="src/agentscope/state/_a2a_state.py:10">_a2a_state.py:10</span>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>字段</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code>session_id</code><span class="src" data-src="src/agentscope/state/_a2a_state.py:13">_a2a_state.py:13</span></td><td>本地事件分组</td></tr>
+              <tr><td><code>context_id</code><span class="src" data-src="src/agentscope/state/_a2a_state.py:16">_a2a_state.py:16</span></td><td>续接远端会话</td></tr>
+              <tr><td><code>task_id</code><span class="src" data-src="src/agentscope/state/_a2a_state.py:19">_a2a_state.py:19</span></td><td>续接等待输入的 Task</td></tr>
+              <tr><td><code>observed_context</code><span class="src" data-src="src/agentscope/state/_a2a_state.py:22">_a2a_state.py:22</span></td><td>尚未发出去的历史消息</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <pre><code>from agentscope.agent import A2AAgent
+from agentscope.state import A2AAgentState
+
+# 从数据库里取回上次保存的 context_id
+stored = A2AAgentState(
+    context_id="ctx-123",
+    task_id=None,
+)
+
+agent = A2AAgent(card, state=stored)</code></pre>
+        <p>
+          只保存 <code>context_id</code> 就能续上多轮；如果上次远端停在
+          <code>INPUT_REQUIRED</code>，再保存 <code>task_id</code> 才能续上那个具体 Task。
+          <code>observed_context</code> 里是还没发出去的消息，通常不需要持久化。
+        </p>
+
+        <h2 id="observe">observe：把历史塞进下一次输入</h2>
+        <p>
+          本地 <code>Agent</code> 的 <code>observe()</code> 是写入上下文；
+          <code>A2AAgent</code> 的 <code>observe()</code> 只是缓存，
+          等下一次 <code>reply()</code> 时一起发送
+          <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:646">_a2a_agent.py:646</span>。
+        </p>
+        <pre><code>from agentscope.message import UserMsg
+
+
+async def ask(remote) -&gt; None:
+    await remote.observe(
+        [
+            UserMsg(name="user", content="我下个月去杭州。"),
+            UserMsg(name="assistant", content="好的，记下了。"),
+        ],
+    )
+    reply = await remote.reply(
+        UserMsg(name="user", content="那周末怎么安排？"),
+    )
+    print(reply.get_text_content())</code></pre>
+        <p>
+          如果这次发送在预检阶段就被拒绝，缓存不会清空，方便重试；
+          一旦真正发出，缓存就清空。
+        </p>
+        <p>
+          <code>compress_context()</code> 是空操作
+          <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:630">_a2a_agent.py:630</span>：
+          上下文归远端管，本地没有可压缩的东西。
+        </p>
+
+        <h2 id="server">服务端：把 AgentScope Agent 暴露为 A2A</h2>
+        <p>
+          核心包只提供客户端 <code>A2AAgent</code>；<strong>没有</strong>把 A2A 服务端集成进
+          <code>create_app</code>。要对外提供 A2A，用官方 <code>a2a-sdk</code> 的服务端原语，
+          把 AgentScope 的 reply 流桥接过去。
+        </p>
+        <p>
+          先定义 Agent Card 和路由：
+        </p>
+        <pre><code>from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
+from a2a.server.tasks import InMemoryTaskStore
+from a2a.types import (
+    AgentCapabilities,
+    AgentCard,
+    AgentInterface,
+    AgentSkill,
+)
+from starlette.applications import Starlette
+
+
+def create_a2a_app(executor, base_url: str) -&gt; Starlette:
+    card = AgentCard(
+        name="Friday",
+        description="An AgentScope assistant exposed over A2A 1.0.",
+        version="1.0.0",
+        supported_interfaces=[
+            AgentInterface(
+                url=base_url,
+                protocol_binding="JSONRPC",
+                protocol_version="1.0",
+            ),
+        ],
+        capabilities=AgentCapabilities(streaming=True),
+        default_input_modes=["text/plain"],
+        default_output_modes=["text/plain"],
+        skills=[
+            AgentSkill(
+                id="chat",
+                name="Chat",
+                description="Answer questions in a multi-turn conversation.",
+                tags=["chat"],
+            ),
+        ],
+    )
+    handler = DefaultRequestHandler(
+        agent_executor=executor,
+        task_store=InMemoryTaskStore(),
+        agent_card=card,
+    )
+    return Starlette(
+        routes=[
+            *create_agent_card_routes(card),
+            *create_jsonrpc_routes(handler, rpc_url="/"),
+        ],
+    )</code></pre>
+        <p>
+          这段对应上游 <code>examples/a2a/server.py</code>
+          <span class="src" data-src="examples/a2a/server.py:129">server.py:129</span>。
+          <code>InMemoryTaskStore</code> 只适合单进程演示；生产要换成持久化实现。
+        </p>
+
+        <h2 id="server-task">Task 生命周期与流式 Artifact</h2>
+        <p>
+          服务端的核心是一个 <code>AgentExecutor</code>：每个
+          <code>context_id</code> 一个 AgentScope Agent，保证并发会话互不串味。
+        </p>
+        <pre><code>from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue
+from a2a.server.tasks import TaskUpdater
+from a2a.types import Part, Task, TaskState, TaskStatus
+
+from agentscope.event import TextBlockDeltaEvent
+from agentscope.message import UserMsg
+
+
+class AgentScopeExecutor(AgentExecutor):
+    def __init__(self, agent_factory):
+        self._agent_factory = agent_factory
+        self._agents = {}
+
+    async def execute(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -&gt; None:
+        agent = self._agents.setdefault(
+            context.context_id,
+            self._agent_factory(),
+        )
+
+        await event_queue.enqueue_event(
+            Task(
+                id=context.task_id,
+                context_id=context.context_id,
+                status=TaskStatus(
+                    state=TaskState.TASK_STATE_SUBMITTED,
+                ),
+            ),
+        )
+        updater = TaskUpdater(
+            event_queue,
+            task_id=context.task_id,
+            context_id=context.context_id,
+        )
+        await updater.start_work()
+
+        artifact_id = f"{context.task_id}-reply"
+        pending = None
+        started = False
+        async for event in agent.reply_stream(
+            UserMsg(name="user", content=context.get_user_input()),
+        ):
+            if not isinstance(event, TextBlockDeltaEvent):
+                continue
+            if pending is not None:
+                await updater.add_artifact(
+                    [Part(text=pending)],
+                    artifact_id=artifact_id,
+                    append=started,
+                    last_chunk=False,
+                )
+                started = True
+            pending = event.delta
+
+        if pending is not None:
+            await updater.add_artifact(
+                [Part(text=pending)],
+                artifact_id=artifact_id,
+                append=started,
+                last_chunk=True,
+            )
+        await updater.complete()
+
+    async def cancel(self, context, event_queue):
+        await TaskUpdater(
+            event_queue,
+            task_id=context.task_id,
+            context_id=context.context_id,
+        ).cancel()</code></pre>
+        <ul>
+          <li>Task 必须先 <code>enqueue_event</code>，否则后续 update 没有归属</li>
+          <li><code>start_work()</code> / <code>complete()</code> / <code>cancel()</code> 负责状态迁移</li>
+          <li>每个文本 delta 先攒着，下一个 delta 到时才发上一个，
+            这样最后一个能标 <code>last_chunk=True</code></li>
+          <li>只转译 <code>TextBlockDeltaEvent</code>；工具、思考、hint 不会发给 A2A 客户端</li>
+        </ul>
+        <p>
+          上游实现见
+          <span class="src" data-src="examples/a2a/server.py:41">server.py:41</span>。
+          Agent 映射在内存字典里，所以这个示例是单进程的；多副本部署需要把会话状态外置，
+          或者按 <code>context_id</code> 做粘性路由。
+        </p>
+
+        <h2 id="limits">不支持的能力：工具、思考、HITL 与推送</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>能力</th>
+                <th>A2AAgent</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>模型 / 工具 / 中间件 / 权限</td><td>不提供</td><td>全部由远端决定</td></tr>
+              <tr><td>结构化输出</td><td>不提供</td><td>协议侧没有对应表达</td></tr>
+              <tr><td>思考块 / 工具调用块 / hint</td><td>不转译</td><td>A2A 只传最终产物</td></tr>
+              <tr><td>HITL 暂停与恢复</td><td>不提供</td><td><code>INPUT_REQUIRED</code> 以普通回复呈现</td></tr>
+              <tr><td>Push Notification</td><td>不支持</td><td>适配器只处理同步流</td></tr>
+              <tr><td>本地上下文压缩</td><td>空操作</td><td>远端拥有上下文</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          这不是「缺功能」，而是边界：A2A 是 Agent 之间的最终产物交换，
+          不是把远端 Agent 的内部执行过程搬到本地。
+        </p>
+
+        <h2 id="security">安全：卡片、凭据与不可信输出</h2>
+        <ul>
+          <li><strong>出站 SSRF</strong>：不要把用户输入的 URL 直接交给
+            <code>A2ACardResolver</code>；按域名 allowlist 限制。</li>
+          <li><strong>卡片投毒</strong>：<code>name</code> / <code>description</code> /
+            <code>skills</code> 都可能带提示注入，展示与拼接前要清洗。</li>
+          <li><strong>凭据</strong>：A2A 的凭据在协议之外，别把 API key 塞进消息 Part；
+            自定义 <code>client</code> 走正规鉴权头或 mTLS。</li>
+          <li><strong>远端输出</strong>：把它当不可信内容；如果本地还要用工具处理，
+            先过权限系统与沙箱。</li>
+          <li><strong>服务端</strong>：官方示例没有鉴权与限流，对外前要自己在
+            Starlette / 网关上补。</li>
+        </ul>
+        <div class="callout warn">
+          <span class="ct">A2A 不是信任边界</span>
+          <p>
+            协议只负责消息格式，不负责「对方可信」。跨组织调用时，
+            身份认证、配额、内容审核都要你自己加。
+          </p>
+        </div>
+
+        <h2 id="ops">生产注意：多副本、超时与幂等</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>问题</th>
+                <th>做法</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>客户端超时，远端还在跑</td>
+                <td>不能立刻重发；先查 <code>task_id</code>，仍在运行就等待或取消</td>
+              </tr>
+              <tr>
+                <td>重试导致重复执行</td>
+                <td>服务端按 <code>task_id</code> / <code>message_id</code> 做幂等</td>
+              </tr>
+              <tr>
+                <td>多副本丢内存 Agent</td>
+                <td>状态外置，或按 <code>context_id</code> 粘性路由</td>
+              </tr>
+              <tr>
+                <td>TaskStore 重启丢失</td>
+                <td>演示用 <code>InMemoryTaskStore</code>，生产换持久化实现</td>
+              </tr>
+              <tr>
+                <td>长任务拖住连接</td>
+                <td>流式 artifact + 超时；必要时改推送模式（本适配器不支持）</td>
+              </tr>
+              <tr>
+                <td>大文件传输</td>
+                <td>用 URL Part 而不是 base64 raw，减少消息体积</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          <code>A2AAgent</code> 的事件流也适合接第 21 章的追踪：给远端调用加自定义 span，
+          把 <code>context_id</code> / <code>task_id</code> 写进属性，跨组织排障会轻松很多。
+        </p>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>安装</td><td><code>pip install "agentscope[a2a]"</code></td></tr>
+              <tr><td>取卡片</td><td><code>A2ACardResolver(...).get_agent_card()</code></td></tr>
+              <tr><td>连接</td><td><code>async with A2AAgent(card) as remote:</code></td></tr>
+              <tr><td>流式对话</td><td><code>remote.reply_stream(msg)</code></td></tr>
+              <tr><td>拿最终消息</td><td><code>await remote.reply(msg)</code></td></tr>
+              <tr><td>续接会话</td><td><code>A2AAgentState(context_id=...)</code></td></tr>
+              <tr><td>预置历史</td><td><code>await remote.observe(msgs)</code></td></tr>
+              <tr><td>对外提供 A2A</td><td>官方 <code>a2a-sdk</code> + <code>AgentExecutor</code></td></tr>
+              <tr><td>判断结束</td><td>看 <code>ReplyEndEvent.finished_reason</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">把 <code>task_id</code> 当成 reply id</span>
+          <p>
+            一次 reply 可能跨多个 Task，也可能续上旧 Task。持久化时
+            <code>context_id</code> 必存，<code>task_id</code> 只在等待输入时才有意义。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">远端还在跑就重发</span>
+          <p>
+            适配器会直接抛 <code>RuntimeError</code>，因为再发会让远端重复执行。
+            正确做法是等待、查询或取消，不是无脑重试。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">把工具调用消息发给 A2AAgent</span>
+          <p>
+            只支持文本与 DataBlock；<code>ToolCallBlock</code> / <code>ThinkingBlock</code>
+            会直接抛 <code>TypeError</code>。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">以为 <code>INPUT_REQUIRED</code> 是本地暂停</span>
+          <p>
+            本地没有任何挂起状态，这次 reply 已经结束；远端的问题就在状态消息里，
+            用下一次 <code>reply()</code> 回答。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">在多副本里用内存 Agent 字典</span>
+          <p>
+            上游服务端示例按 <code>context_id</code> 存 Agent 实例，只适合单进程。
+            多副本要外置状态或做粘性路由，否则同一会话会丢上下文。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">把 Agent Card 当可信配置</span>
+          <p>
+            卡片来自远端，名称与描述都可能被投毒。展示、拼接提示词、决定路由前都要校验。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">文档说 <code>reply_stream</code> 不支持 <code>yield_final_msg</code></span>
+          <p>
+            2.0.11 源码已经支持这个参数
+            <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:283">_a2a_agent.py:283</span>，
+            以源码为准；用 <code>renderer.last_msg</code> 或 <code>reply()</code> 也同样可行。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li><code>context_id</code> 与 <code>task_id</code> 各解决什么问题？哪个必须持久化？</li>
+          <li>远端返回 <code>INPUT_REQUIRED</code> 时，本地 <code>finished_reason</code> 是什么？为什么？</li>
+          <li>A2A 服务端为什么不能直接复用 <code>create_app</code>？多副本时最大的坑是什么？</li>
+        </ol>
+
+        <h2 id="exercise">20 分钟动手练习</h2>
+        <ol>
+          <li>跑通 <code>examples/a2a</code> 的 server 与 client，观察流式 artifact。</li>
+          <li>用 <code>A2AAgentState(context_id=...)</code> 新建实例，确认第二次对话仍在同一远端上下文。</li>
+          <li>让服务端在回复后停在 <code>INPUT_REQUIRED</code>，观察 <code>task_id</code> 是否保留。</li>
+          <li>发一条带 <code>DataBlock</code> 的图片消息，确认转成 URL 或 raw Part。</li>
+          <li>给 A2A 调用加一个自定义 span，把 <code>context_id</code> 与 <code>task_id</code> 写进属性。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          跨 Agent 的协议讲完了。下一章 <strong>25 实时语音：TTS、ASR 与语音交互</strong>
+          讲怎么把文本对话扩展到麦克风与扬声器。想先复习终端事件渲染，可以回
+          <a href="14-console.html">14 终端 UI</a>。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
