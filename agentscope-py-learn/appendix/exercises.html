@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 教程各章动手练习的参考实现与检查点：Agent、消息事件、模型、工具、上下文、中间件、权限、流水线、RAG、工作区、服务、团队、渠道、中心、共享、观测、评测、生产化、A2A、语音与综合案例。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="G 动手练习答案：每章做完怎么对照 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="各章练习的参考实现与检查点。" />
+    <title>G 动手练习答案：每章做完怎么对照 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="appendix-exercises" data-root="..">
+    <main>
+      <article class="article">
+        <h1>G · 动手练习答案</h1>
+        <p class="lede">
+          这不是标准答案，而是「参考实现 + 检查点」。同一道练习可以有不同的写法，
+          重点是你能不能解释每一步为什么这样做。建议先自己写，再对照。
+        </p>
+
+        <h2 id="how">怎么用这份答案</h2>
+        <ul class="goals">
+          <li>先跑通自己的版本，再对照参考实现，不要直接抄。</li>
+          <li>重点看「检查点」：它们比代码更能说明你有没有理解。</li>
+          <li>如果代码能跑但检查点答不上来，回到对应章节重读。</li>
+        </ul>
+
+        <h2 id="ch01-03">第 01–03 章：环境、第一个 Agent 与消息事件</h2>
+        <p>
+          01 的改语言实验不需要动其他代码，只改系统提示；02 的流式实验直接复用
+          <code>reply_stream</code> 的事件循环。
+        </p>
+        <pre><code>from agentscope.event import EventType
+from agentscope.message import UserMsg
+
+
+async def stream_once(agent) -&gt; None:
+    async for event in agent.reply_stream(
+        UserMsg(name="user", content="用三句话解释 ReAct。"),
+    ):
+        if event.type == EventType.TEXT_BLOCK_DELTA:
+            print(event.delta, end="", flush=True)
+        elif event.type == EventType.REPLY_END:
+            print(f"\n[done] {event.finished_reason}")</code></pre>
+        <p><strong>检查点：</strong></p>
+        <ul>
+          <li>改 <code>system_prompt="Only answer in English."</code> 后，如果仍是中文，先确认没有第二处系统提示覆盖它。</li>
+          <li>首字延迟看第一个 <code>TEXT_BLOCK_DELTA</code>，不是整个流结束时间。</li>
+          <li>换 <code>OllamaChatModel</code> 只改模型构造；<code>Agent</code>、<code>UserMsg</code>、<code>Toolkit</code> 的代码不动，能跑通说明模型层是解耦的。</li>
+          <li><code>ReActConfig(max_iters=1)</code> 遇到需要两次工具调用的问题时，应以 <code>exceed_max_iters</code> 结束，而不是假装成功。</li>
+          <li>事件 reducer 只处理 <code>TEXT_BLOCK_START</code> / <code>TEXT_BLOCK_DELTA</code> / <code>REPLY_END</code> 就够了；先别把所有事件类型都塞进状态机。</li>
+          <li><code>msg.model_dump(mode="json")</code> 再 <code>Msg.model_validate</code> 后，内容块的数量与类型应完全一致。</li>
+        </ul>
+
+        <h2 id="ch04-05">第 04–05 章：模型接入与工具系统</h2>
+        <p>
+          模型练习的重点是「看清边界」：哪些是凭证错误，哪些是模型能力，
+          哪些是框架的重试策略。
+        </p>
+        <pre><code>from agentscope.message import TextBlock
+from agentscope.permission import (
+    PermissionBehavior,
+    PermissionContext,
+    PermissionDecision,
+)
+from agentscope.tool import ParamsBase, ToolBase, ToolChunk
+
+
+class CityParams(ParamsBase):
+    city: str
+
+
+class CityWeatherTool(ToolBase):
+    name = "get_weather"
+    description = "查询指定城市的天气，只读。"
+    input_schema = CityParams.model_json_schema()
+    is_read_only = True
+
+    async def check_permissions(
+        self,
+        tool_input: dict,
+        context: PermissionContext,
+    ) -&gt; PermissionDecision:
+        if tool_input.get("city") not in {"Beijing", "Shanghai"}:
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                message="only two cities are allowed",
+            )
+        return PermissionDecision(
+            behavior=PermissionBehavior.ALLOW,
+            message="read-only weather query",
+        )
+
+    async def call(self, city: str) -&gt; ToolChunk:
+        return ToolChunk(content=[TextBlock(text=f"{city}: 18C, sunny")])</code></pre>
+        <p><strong>检查点：</strong></p>
+        <ul>
+          <li><code>DeepSeekCredential.list_models()</code> 返回的是卡片列表；标了 sunset 的模型即使还能调，也不该放进新项目。</li>
+          <li><code>stream=True</code> 时最后一项 <code>is_last=True</code> 才带完整 usage；只读第一项会得到 0。</li>
+          <li>key 写错会第一次就抛 <code>AuthenticationError</code>，不会重试四次；重试只针对可重试错误。</li>
+          <li><code>ToolGroup</code> 里的工具默认不激活；模型先调用 <code>reset_tools</code> 才会看到它们。</li>
+          <li>工具抛异常时，框架把可读错误文本回给模型，整轮对话不中断；这和自己把异常吞掉是两回事。</li>
+        </ul>
+
+        <h2 id="ch06-08">第 06–08 章：上下文、中间件与权限</h2>
+        <p>
+          中间件的最小实验是「只观察，不改变」：先打印模型调用的输入规模，
+          确认插入点正确，再加逻辑。
+        </p>
+        <pre><code>from agentscope.middleware import MiddlewareBase
+
+
+class ModelAuditMiddleware(MiddlewareBase):
+    async def on_model_call(self, agent, input_kwargs, next_handler):
+        messages = input_kwargs.get("messages", [])
+        print(
+            f"[model] agent={agent.name} "
+            f"messages={len(messages)} model={type(agent.model).__name__}",
+        )
+        return await next_handler(**input_kwargs)</code></pre>
+        <p><strong>检查点：</strong></p>
+        <ul>
+          <li><code>tool_result_limit=200</code> 后，长输出应出现截断标记；模型后续行为会受截断影响，这是预期。</li>
+          <li>挂上 <code>LocalWorkspace</code> 后，截断的完整结果落在 <code>sessions/{id}/tool_result-*.txt</code>。</li>
+          <li><code>timezone="Asia/Shanghai"</code> 与更小的时间间隔，会影响 <code>HintBlockEvent</code> 里的时间文本。</li>
+          <li><code>on_system_prompt</code> 是按列表顺序接力的；后一个中间件看到的是前一个改过的提示。</li>
+          <li><code>PermissionMode.EXPLORE</code> 下写文件应被直接拒绝，不进入确认流程。</li>
+          <li>最小确认循环：捕获 <code>RequireUserConfirmEvent</code>，第一次拒绝、第二次确认，比较两轮回复。</li>
+        </ul>
+
+        <h2 id="ch09-11">第 09–11 章：流水线、计划 SOP 与 RAG</h2>
+        <p>
+          流水线练习先写「验证者怎么判 fail」，再写执行者。验证标准不清楚，
+          <code>max_iters</code> 调多大都没用。
+        </p>
+        <pre><code>from agentscope.pipeline import GoalPipeline
+
+pipe = GoalPipeline(
+    executor=executor,
+    verifier=verifier,
+    max_iters=1,
+)
+# 第一次验证 fail 后，max_iters=1 应立即停止，而不是无限重试</code></pre>
+        <p><strong>检查点：</strong></p>
+        <ul>
+          <li><code>GoalPipeline</code> 的停止条件是「验证通过」或「达到 max_iters」；只设退出条件不设上限可能一直跑。</li>
+          <li><code>TeamPipeline</code> 的事件流里，<code>reply_id</code> 会在队长与成员之间切换；跟着它看是谁在说话。</li>
+          <li>任务工具不会替模型检查依赖顺序；被阻塞的任务仍可能被先做，这是设计边界，不是 bug。</li>
+          <li>SOP 第一步带验证者、第二步不带时，事件流里应只有第一步出现验证相关事件。</li>
+          <li><code>TextParser</code> + <code>ApproxTokenChunker</code> 切块后，<code>chunk_index</code> 与 <code>total_chunks</code> 应能对上。</li>
+          <li><code>QdrantStore(location=":memory:")</code> 适合练习；生产要换成持久化地址。</li>
+          <li>static 模式不会出现 <code>search_knowledge</code> 工具调用；agentic 模式会出现。</li>
+          <li>长期记忆跟着 <code>workdir</code> 走；新建 Agent 复用同一个 workdir 才能看到之前的偏好。</li>
+        </ul>
+
+        <h2 id="ch12-14">第 12–14 章：工作区、中断恢复与控制台</h2>
+        <p>
+          工作区练习要同时看「文件落在哪」和「工具在哪执行」。
+          这两件事在 Local 与 Docker 下不一样。
+        </p>
+        <pre><code>from agentscope.workspace import LocalWorkspace
+
+async with LocalWorkspace(workdir="./workspace") as ws:
+    tools = await ws.list_tools()
+    # 让 Agent 写文件，再去 ws.workdir 里读回来</code></pre>
+        <p><strong>检查点：</strong></p>
+        <ul>
+          <li>LocalWorkspace 的文件落在 <code>workdir</code>；DockerWorkspace 的路径在容器里，不是宿主机的同一个路径。</li>
+          <li>直接构造 <code>Bash</code> 不传 backend 时，执行位置与 <code>workspace.list_tools()</code> 里的 Bash 不同。</li>
+          <li><code>async with</code> 退出后，容器或临时目录应被清理；没清理先看是否有异常跳过了上下文管理器。</li>
+          <li>状态存成 JSON 再恢复时，工具调用与结果要成对出现；恢复后继续问相关问题，模型应记得上一轮。</li>
+          <li><code>task.cancel()</code> 后，每个 <code>tool_call</code> 都应有对应的 <code>tool_result</code>，哪怕是中断结果。</li>
+          <li>HITL 挂起时发 <code>UserInterruptEvent</code>，事件流里应出现中断结果，而不是继续等待确认。</li>
+          <li><code>launch_console</code> 的 <code>y</code> 是确认、<code>a</code> 是总是允许；两者对后续工具调用的影响不同。</li>
+          <li><code>verbosity="debug"</code> 才能看到模型调用开始/结束与 token 用量。</li>
+        </ul>
+
+        <h2 id="ch15-18">第 15–18 章：Agent Service、SSE、团队与渠道</h2>
+        <p>
+          服务练习先跑最小闭环，再谈多副本。单进程用 SQLite + 进程内总线，
+          多副本再换 Redis。
+        </p>
+        <pre><code>from agentscope.app import create_app
+from agentscope.app.message_bus import InMemoryMessageBus
+from agentscope.app.storage import AsyncSQLAlchemyStorage
+from agentscope.app.workspace_manager import LocalWorkspaceManager
+
+app = create_app(
+    storage=AsyncSQLAlchemyStorage("sqlite+aiosqlite:///./as.db"),
+    message_bus=InMemoryMessageBus(),
+    workspace_manager=LocalWorkspaceManager(basedir="./workspaces"),
+)</code></pre>
+        <p><strong>检查点：</strong></p>
+        <ul>
+          <li><code>/docs</code> 能看到 OpenAPI；<code>/health</code> 也要带 <code>X-User-ID</code>，否则 422。</li>
+          <li>建 Agent → 建凭证 → 建会话 → <code>POST /chat</code> → 订阅 SSE，顺序不能反；没有凭证时创建会话会失败。</li>
+          <li>流式中途 <code>POST /sessions/{id}/interrupt</code> 后，会话应回到可继续状态，而不是永久 running。</li>
+          <li>覆盖 <code>get_current_user_id</code> 后，后续请求不再需要 <code>X-User-ID</code>；这只是依赖覆盖，不是鉴权方案。</li>
+          <li><code>curl -N</code> 订阅后再发 <code>POST /chat</code>，先收到回放、再收到实时事件。</li>
+          <li>断线重连带 <code>after=event_cursor</code>，不应丢帧；<code>before</code> 是翻页，不是重放游标。</li>
+          <li><code>/status</code> 的 <code>awaiting_permission</code> 表示工具在等确认，不是错误。</li>
+          <li>团队不需要 <code>team=true</code>；Leader 会话自动拿到团队工具，Worker 只有 <code>TeamSay</code>。</li>
+          <li><code>per_chat_user</code> 下，同一群聊里两个用户各自一个会话；<code>per_chat</code> 则整群共享。</li>
+          <li>自定义渠道先只打印 <code>ChannelEvent</code> 再回固定文本，确认路由通了再接平台 SDK。</li>
+        </ul>
+
+        <h2 id="ch19-21">第 19–21 章：中心、共享与观测</h2>
+        <p>
+          共享策略先写「谁能看到谁」，再写「能不能改」。两个方法分开，
+          才不会把只读共享误做成可编辑。
+        </p>
+        <pre><code>from agentscope.app.access import (
+    ResourceAccessPolicyBase,
+    ResourceKind,
+    ResourceRef,
+    ResourcePermission,
+)
+
+
+class DictPolicy(ResourceAccessPolicyBase):
+    async def list_accessible(self, viewer_id, kind, storage):
+        if viewer_id == "bob" and kind == ResourceKind.CREDENTIAL:
+            return [
+                ResourceRef(
+                    kind=kind,
+                    owner_id="alice",
+                    resource_id="cred-openai",
+                    permission=ResourcePermission.READ,
+                ),
+            ]
+        return []</code></pre>
+        <p><strong>检查点：</strong></p>
+        <ul>
+          <li>安装 ≠ 装配：MCP/技能装进资源池后，还要在工作区里装配给某个 Agent。</li>
+          <li>只对特定用户可见的 Hub，要在 <code>list_*</code> 与 <code>get_*</code> 两处都过滤；只过滤列表仍可通过 id 直接取。</li>
+          <li>卡片加 <code>api_key</code> 输入时，前端应渲染成密码框；这是 UI 约定，不是加密。</li>
+          <li>Bob 列出 Alice 共享的凭证时能看到名字与类型，但看不到 key；原始密钥只在运行时解析。</li>
+          <li><code>READ</code> → <code>EDIT</code> 后，<code>editable</code> 与 PATCH/DELETE 行为一起变；只改一个地方会出现「按钮能点但接口 403」。</li>
+          <li>共享 Agent 不共享工作区、MCP、技能与记忆；Bob 从干净 workspace 开始。</li>
+          <li>用 <code>ConsoleSpanExporter</code> 数 span 树节点，先确认一次 reply 的父子关系，再接 OTLP。</li>
+          <li>token 中间件在 <code>ReplyEndEvent</code> 汇总 input/output；usage 缺失时要有 0 或未知的降级值。</li>
+          <li>预算中间件要能阻止下一轮工具调用，而不是只打日志；用小预算触发一次验证。</li>
+          <li>带图片的消息 span 属性可能很大；在 Collector 侧裁剪，不要指望模型侧自动瘦身。</li>
+        </ul>
+
+        <h2 id="ch22-23">第 22–23 章：评测与生产化</h2>
+        <p>
+          评测先保证「不访问网络」，再谈指标。假模型能跑通，
+          说明你的断言在看行为，不是在碰运气。
+        </p>
+        <pre><code># 检索指标的最小实现
+def recall_at_k(retrieved, relevant, k=3):
+    hit = len(set(retrieved[:k]) &amp; set(relevant))
+    return hit / len(relevant) if relevant else 0.0
+
+
+def mrr(retrieved, relevant):
+    for rank, doc_id in enumerate(retrieved, start=1):
+        if doc_id in relevant:
+            return 1.0 / rank
+    return 0.0</code></pre>
+        <p><strong>检查点：</strong></p>
+        <ul>
+          <li><code>ScriptedChatModel</code> 不应访问网络；测试里出现真实 key 或 DNS 请求，说明替身没接上。</li>
+          <li>模型调用不存在的工具时，<code>ToolResultEndEvent.state == "error"</code>，不是整轮抛异常。</li>
+          <li><code>behavior_signature</code> 改坏工具名后，报错信息应能定位到具体用例。</li>
+          <li>小知识库标 5 个问题，先算 recall@3 与 MRR，再看生成指标；检索没命中时不要调提示词。</li>
+          <li>CI 分 unit 与 live 两个 job；PR 只跑 unit，live 用夜间或手动触发。</li>
+          <li>模型超时设 10 秒，用慢接口验证 <code>APITimeoutError</code> 路径，而不是只改配置不验证。</li>
+          <li>SDK 重试与 AgentScope 重试叠在一起会放大请求次数；数日志里的实际请求，不要数配置项。</li>
+          <li>并发限制中间件用信号量时，流结束、异常、取消三条路径都要释放。</li>
+          <li>两个 uvicorn worker 共享 Redis 时，同一会话重复提交应得到 409；单进程的 409 与跨进程的等待语义不同。</li>
+          <li><code>/health</code> 带身份头用于就绪检查，<code>/livez</code> 不依赖身份用于存活检查。</li>
+        </ul>
+
+        <h2 id="ch24-26">第 24–26 章：A2A、语音与综合案例</h2>
+        <p>
+          A2A 练习先跑通「同一 <code>context_id</code> 的第二轮」，
+          再谈 Task 生命周期与推送；语音练习先跑通本地声卡，再换浏览器传输。
+        </p>
+        <pre><code># 续接同一段远端会话
+stored = A2AAgentState(
+    context_id="ctx-123",
+    task_id=None,
+)
+agent = A2AAgent(card, state=stored)
+
+# 服务端停在 INPUT_REQUIRED 时，task_id 仍保留；
+# 下一轮用同一个 task_id 继续，而不是新建任务</code></pre>
+        <p><strong>检查点：</strong></p>
+        <ul>
+          <li>A2A 流式 artifact 的顺序应与服务端 Task 状态变化一致；只看到最终文本说明中间状态被吞了。</li>
+          <li><code>context_id</code> 管「同一段对话」，<code>task_id</code> 管「这一次任务」；两者不要混用。</li>
+          <li><code>INPUT_REQUIRED</code> 不是失败，是远端在等输入；本地不要把它当异常结束。</li>
+          <li><code>DataBlock</code> 图片会转成 URL 或 raw Part；超出支持范围的内容要提前拒绝。</li>
+          <li>A2A 调用加自定义 span，把 <code>context_id</code> 与 <code>task_id</code> 写进属性，跨组织排障才定位得到。</li>
+          <li>TTS 合成看 <code>is_last</code> 行为；只保存第一个音频块会得到半句话。</li>
+          <li>TTSMiddleware 给文本 Agent 配音时，音频事件与文本事件是两条流，不要假设一一对应。</li>
+          <li>ASR 的 <code>language</code> 与 <code>prompt</code> 会显著影响转写；先用一段固定录音做基线。</li>
+          <li>RealtimeAgent 打断后，<code>last_turn_metrics</code> 应能说明本轮延迟；打断不会自动裁剪上下文。</li>
+          <li>自定义传输要模拟浏览器上报的播放位置，否则服务端不知道用户听到哪。</li>
+          <li>综合案例先跑最小闭环，再按凭证 → Agent → 会话 → 知识库 → 共享 → 追踪 → 评测逐层加。</li>
+          <li>上线前 <code>/health</code> 所有组件 ok；3 条假模型回归 + 1 条真实模型冒烟接进 CI。</li>
+        </ul>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          做完练习后，回到 <a href="../chapters/00-study-map.html">00 学习地图</a>
+          选一条主线做自己的项目；或者从 <a href="../chapters/26-capstone.html">26 综合案例</a>
+          开始，把 Atlas 换成你的业务。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
