@@ -80,6 +80,12 @@ for (const it of flat) {
   if (article) html = article[1];
   else console.warn(`[warn] ${it.href} 找不到 <article>，退化为整页索引`);
 
+  // 交互组件等不适合进搜索索引的内容，用注释标记跳过
+  html = html.replace(
+    /<!--\s*search:off\s*-->[\s\S]*?<!--\s*search:on\s*-->/g,
+    " ",
+  );
+
   const headRe = /<h2\b([^>]*)>([\s\S]*?)<\/h2>/g;
   const heads = [];
   let m;
