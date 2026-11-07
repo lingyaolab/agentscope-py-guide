@@ -289,8 +289,9 @@ class ToolAuditMiddleware(MiddlewareBase):
         <p>
           <code>on_check_permission</code> 在工具解析、参数校验之后，决策被消费之前执行
           <span class="src" data-src="src/agentscope/middleware/_base.py:178">_base.py:178</span>。
-          它拿到的是 <code>tool_call</code>、<code>tool</code>、<code>tool_input</code> 的<strong>副本</strong>，
-          改副本不会影响真正执行
+          它拿到的是 <code>tool_call</code> 与 <code>tool_input</code> 的<strong>副本</strong>，
+          <code>tool</code> 则是真实实例。改副本不会影响真正执行，但改 <code>tool</code> 的字段
+          可能影响后续工具调用
           <span class="src" data-src="src/agentscope/agent/_agent.py:2373">_agent.py:2373</span>。
         </p>
         <pre><code>from agentscope.permission import PermissionBehavior, PermissionDecision
@@ -411,8 +412,9 @@ class ContinueOnceMiddleware(MiddlewareBase):
         <p>
           加权成本 = <code>input_token_weight × input</code> + <code>output_token_weight × output</code>
           <span class="src" data-src="src/agentscope/middleware/_budget.py:35">_budget.py:35</span>。
-          达到预算后，它会往最后一条 assistant 消息追加 <code>HintBlock</code>，并把下一步的
-          <code>tool_choice</code> 强制改成 <code>none</code>，逼模型收尾
+          达到预算后，它会往最后一条本 Agent 的 assistant 消息追加 <code>HintBlock</code>
+          （否则新建一条），并把下一步的 <code>tool_choice</code> 强制改成 <code>none</code>，逼模型收尾；
+          如果还有结构化输出没交，则只允许结构化输出工具，不是全禁
           <span class="src" data-src="src/agentscope/middleware/_budget.py:230">_budget.py:230</span>。
         </p>
         <pre><code>from agentscope.middleware import ReplyBudgetControlMiddleware

@@ -99,8 +99,10 @@
           因为调用方是「调用它然后 <code>async for</code>」，不是「await 它」。
         </p>
         <p>
-          这个设计带来一个很实用的结果：<strong>Agent 本身就是「只有一个成员」的流水线</strong>。
-          凡是接受 Agent 的地方，都能直接传流水线：
+          这个设计带来一个很实用的结果：<strong>只依赖 <code>reply_stream</code> 的入口</strong>
+          可以直接接收流水线，比如 <code>launch_console</code>。但 Goal / Team / SOP 的 Agent 槽位
+          类型是 <code>Agent</code>，还会传 <code>structured_schema</code> 等额外参数，
+          不能无差别替换。
         </p>
         <pre><code>async def watch(target, inputs) -&gt; None:
     async for event in target.reply_stream(inputs):
@@ -331,7 +333,7 @@ leader = Agent(
     name="Leader",
     system_prompt="You're a team leader named 'Leader'.",
     model=model,
-    toolkit=Toolkit(),          # 必须带工具箱，流水线会注册 TeamAssign
+    toolkit=Toolkit(),          # 可省略；流水线会用 leader.toolkit.add_tool 注册 TeamAssign
 )
 
 pipe = TeamPipeline(

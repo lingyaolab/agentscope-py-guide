@@ -150,7 +150,7 @@ toolkit = Toolkit(
               </tr>
             </thead>
             <tbody>
-              <tr><td><code>id</code><span class="src" data-src="src/agentscope/state/_task.py:28">_task.py:28</span></td><td>单调递增的数字串，由 <code>TaskCreate</code> 分配</td></tr>
+              <tr><td><code>id</code><span class="src" data-src="src/agentscope/state/_task.py:28">_task.py:28</span></td><td>按当前最大数字 ID + 1 分配；删除最大 ID 后会复用</td></tr>
               <tr><td><code>subject</code><span class="src" data-src="src/agentscope/state/_task.py:13">_task.py:13</span></td><td>一句话命令式描述</td></tr>
               <tr><td><code>description</code><span class="src" data-src="src/agentscope/state/_task.py:16">_task.py:16</span></td><td>详细需求与上下文</td></tr>
               <tr><td><code>state</code><span class="src" data-src="src/agentscope/state/_task.py:25">_task.py:25</span></td><td><code>pending</code> / <code>in_progress</code> / <code>completed</code></td></tr>
@@ -423,7 +423,7 @@ engine = SOPEngine(
         <p>
           执行者或验证者停在工具授权 / 外部执行上时，这一步进入 <code>AWAITING</code>，
           <code>reply_stream</code> 直接结束，不挂起协程。恢复时把结果事件喂回去，
-          引擎按 <code>reply_id</code> 找到挂起的那一步。
+          引擎会把它交给第一个处于 <code>AWAITING</code> 的步骤，不靠 <code>reply_id</code> 路由。
         </p>
         <pre><code>async def resume(engine, confirm_event) -&gt; None:
     async for event in engine.reply_stream(confirm_event):
@@ -528,7 +528,7 @@ class RunTests(SOPStepBase):
           <p>
             <code>TaskCreate</code> 用 <code>max(int(id)) + 1</code> 分配下一个 ID
             <span class="src" data-src="src/agentscope/tool/_task/_create_task.py:105">_create_task.py:105</span>。
-            非数字 ID 会被忽略，之后自动分配的 ID 可能和它冲突。统一用 <code>"1"</code>、<code>"2"</code>。
+            非数字 ID 会被忽略；自动分配只产生纯数字，不会和非数字冲突，但之后手工写同号数字会冲突。统一用 <code>"1"</code>、<code>"2"</code>。
           </p>
         </div>
         <div class="callout warn">

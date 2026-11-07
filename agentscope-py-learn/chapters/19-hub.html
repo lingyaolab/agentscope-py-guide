@@ -158,8 +158,9 @@
           指向 GitHub MCP Registry，匿名可用。
         </p>
         <p>
-          用户点安装时，前端根据 <code>inputs_schema</code> 生成表单；提交后服务会<strong>立刻尝试连接</strong>，
-          凭证填错会当场在表单上报错，而不是装出一个用不了的条目。
+          用户点安装时，前端根据 <code>inputs_schema</code> 生成表单；服务只校验 schema 并渲染配置模板，
+          <strong>不会测试连接</strong>（<span class="src" data-src="src/agentscope/app/_router/_hub.py:154">_hub.py:154</span>）。
+          填写格式正确但实际无效的 key 会在第一次使用时才报错，而不是安装当场。
         </p>
 
         <h2 id="skill">技能中心：SKILL.md 与安装</h2>
@@ -393,7 +394,7 @@ class InternalSkillHub(SkillHubBase):
           </p>
         </div>
         <p>
-          另外：MCP 凭据加密保存、返回时脱敏；技能里的脚本仍受工作区权限与权限系统约束；
+          另外：MCP 凭据在记录里是明文，返回时脱敏，静态加密需存储层补；技能里的脚本仍受工作区权限与权限系统约束；
           中心是第三方来源，接入前要评估可信度。
         </p>
 

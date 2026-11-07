@@ -184,7 +184,7 @@ async def reply_with_timeout(agent, text: str, timeout: float = 120):
         <p>
           工具超时的语义也不是「杀掉工具」。<code>ToolOffloadMiddleware</code> 到点后把执行
           <strong>转入后台</strong>，先给智能体一个占位结果；后台完成后通过收件箱与唤醒把真实结果送回
-          <span class="src" data-src="src/agentscope/app/middleware/_tool_offload_middleware.py:79">_tool_offload_middleware.py:79</span>。
+          <span class="src" data-src="src/agentscope/app/middleware/_tool_offload_middleware.py:10">_tool_offload_middleware.py:10</span>。
           有副作用的工具被「超时后继续跑」未必符合预期，需要自己判断。
         </p>
 
@@ -294,7 +294,7 @@ agent = Agent(
         <p>
           <code>_call_model</code> 会先对主模型尝试
           <code>max_retries + 1</code> 次，再切到备用模型
-          <span class="src" data-src="src/agentscope/agent/_agent.py:3317">_agent.py:3317</span>。
+          <span class="src" data-src="src/agentscope/agent/_agent.py:3324">_agent.py:3324</span>。
           备用模型可以是不同厂商、不同价位，但要注意：
         </p>
         <ul>
@@ -673,7 +673,7 @@ app = create_app(
             <span class="src" data-src="src/agentscope/app/_router/_health.py:37">_health.py:37</span>，
             默认实现从 <code>X-User-ID</code> 头取身份
             <span class="src" data-src="src/agentscope/app/deps.py:35">deps.py:35</span>。
-            裸的 k8s probe 会得到 401。要么给 probe 加请求头，要么另加一个只检查进程的
+            裸的 k8s probe 会得到 422（缺少必填 header），不是 401。要么给 probe 加请求头，要么另加一个只检查进程的
             <code>/livez</code>。
           </p>
         </div>
@@ -727,7 +727,7 @@ app.dependency_overrides[default_dependency] = get_current_user_id</code></pre>
             <tbody>
               <tr>
                 <td>模型 API key</td>
-                <td>存进凭证记录（加密），不要写进镜像或日志</td>
+                <td>凭证记录里当前是明文 JSON，API 返回时脱敏；静态加密要由 Redis / SQL / 磁盘 / KMS 提供，不要假设框架已加密</td>
               </tr>
               <tr>
                 <td>下载令牌</td>
@@ -799,7 +799,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-RUN pip install "agentscope==2.0.11" uvicorn
+RUN pip install "agentscope[service,storage-redis]==2.0.11" uvicorn
 
 RUN useradd -m app \
     &amp;&amp; mkdir -p /data/workspaces \
@@ -817,7 +817,7 @@ CMD ["uvicorn", "app:app", \
      "--proxy-headers", \
      "--timeout-graceful-shutdown", "30"]</code></pre>
         <ul>
-          <li>版本钉死到 <code>2.0.11</code>，避免构建日与运行日拉到的版本不同</li>
+          <li>版本钉死到 <code>2.0.11</code>；核心包不含 FastAPI / Redis，服务镜像要装 <code>[service,storage-redis]</code>，SQL 另加 <code>[sql]</code></li>
           <li>镜像里不放密钥，全部用环境变量或密钥管理注入</li>
           <li><code>/data/workspaces</code> 挂持久卷；容器重建后工作区还在</li>
           <li>需要 SQL 时在构建阶段加 <code>agentscope[sql]</code> 与数据库驱动</li>
@@ -934,7 +934,7 @@ CMD ["uvicorn", "app:app", \
         <div class="callout warn">
           <span class="ct">把 <code>/health</code> 当 liveness 且不带请求头</span>
           <p>
-            默认依赖会返回 401。要么给 probe 加 <code>X-User-ID</code>，
+            默认依赖会返回 422（缺少必填 header）。要么给 probe 加 <code>X-User-ID</code>，
             要么写一个不依赖身份的 <code>/livez</code>。
           </p>
         </div>

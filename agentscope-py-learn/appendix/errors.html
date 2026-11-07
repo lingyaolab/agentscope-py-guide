@@ -65,8 +65,8 @@
               </tr>
               <tr>
                 <td><strong>403</strong></td>
-                <td>能认证但没权限：资源共享未授权、工具被拒绝</td>
-                <td>检查 <code>resource_access_policy</code> 与权限规则</td>
+                <td>能认证但资源访问策略未授权（共享凭证 / 知识库 / 渠道归属）；工具被拒绝是 <code>ToolResultBlock(state=denied)</code>，不是 HTTP 403</td>
+                <td>检查 <code>resource_access_policy</code> 与资源归属</td>
               </tr>
               <tr>
                 <td><strong>404</strong></td>
@@ -243,7 +243,7 @@
               </tr>
               <tr>
                 <td>技能解压失败</td>
-                <td>压缩包根目录没有 <code>SKILL.md</code></td>
+                <td>压缩包根目录或唯一的顶层文件夹里没有 <code>SKILL.md</code></td>
                 <td>重打目录结构；注意大小限制</td>
               </tr>
             </tbody>
@@ -318,8 +318,8 @@
               </tr>
               <tr>
                 <td><code>ValueError: filename must not be empty</code></td>
-                <td>内存音频没有扩展名</td>
-                <td>传真实文件名（如 <code>.wav</code>）</td>
+                <td>显式传了 <code>filename=""</code>；默认值是 <code>audio.wav</code></td>
+                <td>不要清空 filename；内存音频已有默认扩展名</td>
               </tr>
               <tr>
                 <td>语音自己打断自己</td>
@@ -333,8 +333,8 @@
               </tr>
               <tr>
                 <td>WebRTC Offer 返回 409</td>
-                <td>同一会话正在文字运行或已有语音连接</td>
-                <td>先停旧运行；新 Offer 会替换旧连接</td>
+                <td>未配置 <code>realtime_model_config</code>、<code>turn_detection="none"</code>，或会话正被文字运行占用</td>
+                <td>先配置模型 / 停掉文字运行；已有语音连接会被新 Offer 替换，不报 409</td>
               </tr>
               <tr>
                 <td><code>RuntimeError: A2A task ... is still running</code></td>

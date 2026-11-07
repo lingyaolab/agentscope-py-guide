@@ -283,7 +283,7 @@ app = create_app(
 from agentscope.tool import FunctionTool
 
 
-def build_tools(user_id: str, agent_id: str, session_id: str):
+async def build_tools(user_id: str, agent_id: str, session_id: str):
     allow_read = PermissionDecision(
         behavior=PermissionBehavior.ALLOW,
         decision_reason="handbook is read-only",
@@ -468,7 +468,7 @@ class TeamResourcePolicy(ResourceAccessPolicyBase):
               <tr>
                 <td>1. 建凭证</td>
                 <td><code>GET /credential/schemas</code> → <code>POST /credential</code></td>
-                <td>前端按 schema 渲染，密钥加密保存</td>
+                <td>前端按 schema 渲染；密钥由存储层保存，API 返回脱敏，静态加密需自行补</td>
               </tr>
               <tr>
                 <td>2. 建 Agent 模板</td>
@@ -487,7 +487,7 @@ class TeamResourcePolicy(ResourceAccessPolicyBase):
               </tr>
               <tr>
                 <td>5. 装配 MCP / 技能</td>
-                <td><code>POST /workspace/mcp</code> / <code>POST /workspace/skill</code></td>
+                <td><code>POST /workspace/mcp</code> / <code>POST /workspace/skill/upload</code>（或 <code>/workspace/skill/from-library</code>）</td>
                 <td>安装只是进资源池，装配才生效</td>
               </tr>
               <tr>
@@ -735,7 +735,7 @@ class TeamResourcePolicy(ResourceAccessPolicyBase):
           <li><strong>不要照搬 Java Service 的拆分</strong>：Python 的 <code>create_app</code> 已经把网关、存储、会话、SSE 放在一起，先跑通单体，再按需要拆 worker。</li>
           <li><strong>Reactor 不是 asyncio</strong>：<code>Flux</code> 的背压与取消语义，对应到 Python 是异步生成器的消费与 <code>aclose</code>，不能机械翻译。</li>
           <li><strong>工具注解不同</strong>：Java 的 <code>@Tool</code> 对应 Python 的 <code>FunctionTool</code> 或 <code>ToolBase</code> 子类，schema 生成规则也不同。</li>
-          <li><strong>服务存储不同</strong>：Java Service 依赖 PostgreSQL 与 Go 网关；Python 侧选 Redis 或 SQLAlchemy，迁移脚本与备份策略要重做。</li>
+          <li><strong>服务存储不同</strong>：Java Service 是 Java Gateway + Dataplane、Go Control（<code>aistiod</code>）与 PostgreSQL；Python 侧选 Redis 或 SQLAlchemy，迁移脚本与备份策略要重做。</li>
         </ol>
         <p>
           Java 站第 11 章的「笔记 Agent」是 SDK 级综合案例，第 19–26 章才是服务与运维；

@@ -222,11 +222,13 @@ if __name__ == "__main__":
         </p>
         <pre><code>from agentscope.event import EventType
 
-async for event in agent.reply_stream(user_msg):
-    if event.type == EventType.TEXT_BLOCK_DELTA:
-        print(event.delta, end="", flush=True)
-    elif event.type == EventType.TOOL_CALL_START:
-        print(f"\n[calling tool] {event.tool_name}")</code></pre>
+
+async def print_events(agent, user_msg):
+    async for event in agent.reply_stream(user_msg):
+        if event.type == EventType.TEXT_BLOCK_DELTA:
+            print(event.delta, end="", flush=True)
+        elif event.type == EventType.TOOL_CALL_START:
+            print(f"\n[calling tool] {event.tool_call_name}")</code></pre>
         <p>
           事件类型的完整列表在
           <span class="src" data-src="src/agentscope/event/_event.py:25">_event.py:25</span>，

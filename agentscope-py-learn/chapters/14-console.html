@@ -293,6 +293,10 @@ async def run(agent) -&gt; None:
           工具确认提示长这样：
         </p>
         <pre><code>Allow 'Bash'? [y]es / [N]o / [a]lways</code></pre>
+        <p>
+          只有该工具调用带 <code>suggested_rules</code> 时才会多出
+          <code>[a]lways</code>；否则提示只有 <code>[y]es / [N]o</code>。
+        </p>
         <div class="table-wrap">
           <table>
             <thead>

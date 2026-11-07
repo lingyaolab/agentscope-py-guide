@@ -305,7 +305,7 @@ async def compress_now(agent) -&gt; None:
           <code>CompressContext</code> 工具，可以自己决定「在两件事的交界处」压缩，而不是等硬阈值
           <span class="src" data-src="src/agentscope/agent/_agent.py:443">_agent.py:443</span>。
           工具内部按 <code>trigger_ratio - context_buffer_ratio</code> 判断，没进缓冲区调用也不会变化；
-          它始终放行，不受权限确认影响。
+          它自带 <code>ALLOW</code> 权限决策，但 EXPLORE 模式或显式 deny / ask 规则仍可能拦住它。
         </p>
 
         <h2 id="toolresult">工具结果截断：先保留，再卸载</h2>
@@ -461,7 +461,7 @@ async def build_agent(model, toolkit):
               <tr>
                 <td>上下文用量</td>
                 <td>当前 token 与压缩阈值；开了自主压缩还会提示「现在可以压」</td>
-                <td>回复第一轮，且进入 <code>context_buffer_ratio</code> 缓冲区</td>
+                <td>回复第一轮，且进入 <code>context_buffer_ratio</code> 缓冲区，且没有 in-progress 任务</td>
               </tr>
               <tr>
                 <td>工具报错</td>

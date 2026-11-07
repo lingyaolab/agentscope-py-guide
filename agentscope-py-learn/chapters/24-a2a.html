@@ -290,7 +290,7 @@ async def main() -&gt; None:
         </div>
         <p>
           载荷分派在
-          <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:324">_a2a_agent.py:324</span>。
+          <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:423">_a2a_agent.py:423</span>。
           最终消息的 <code>metadata["a2a"]</code> 记录 <code>context_id</code>；
           块结束事件的 metadata 记录它来自哪个 <code>task_id</code> / <code>artifact_id</code> /
           <code>message_id</code>，排障时很有用。
@@ -333,7 +333,7 @@ async def main() -&gt; None:
         <p>
           发送方向也一样：只接受 <code>TextBlock</code> 与 <code>DataBlock</code>，
           其他块类型直接抛 <code>TypeError</code>
-          <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:550">_a2a_agent.py:550</span>。
+          <span class="src" data-src="src/agentscope/agent/_a2a_agent.py:601">_a2a_agent.py:601</span>。
           所以不要把带工具调用、思考块或 hint 的消息直接发给 A2AAgent。
         </p>
 

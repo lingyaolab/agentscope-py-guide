@@ -265,7 +265,7 @@ msg.has_content_blocks("tool_call")  # 是否包含某类块</code></pre>
         <pre><code>pending → asking → allowed → finished
               └→ finished（用户拒绝）
 pending → allowed（权限直接放行）
-pending → submitted（外部执行工具）→ finished</code></pre>
+pending → allowed（权限直接放行）→ submitted（外部执行工具）→ finished</code></pre>
         <p>
           <code>ToolResultBlock.state</code> 有五个值
           <span class="src" data-src="src/agentscope/message/_block.py:185">_block.py:185</span>：
@@ -348,8 +348,10 @@ pending → submitted（外部执行工具）→ finished</code></pre>
         <p>
           这是本章最重要的一段。<code>Msg.append_event()</code>
           <span class="src" data-src="src/agentscope/message/_base.py:243">_base.py:243</span>
-          定义了「事件 → 消息」的全部规则。它只做三件事：改 <code>content</code>、写 <code>finished_at</code>、
-          累加 <code>usage</code>。
+          定义了「事件 → 消息」的规则。它不只改 <code>content</code>：还会写
+          <code>finished_at</code>、累加 <code>usage</code>、记录 <code>finished_reason</code> /
+          <code>error</code>，并按工具事件推进 <code>ToolCallBlock.state</code>
+          （<code>ASKING</code> / <code>ALLOWED</code> / <code>SUBMITTED</code> / <code>FINISHED</code>）。
         </p>
         <div class="table-wrap">
           <table>
@@ -540,9 +542,9 @@ data: {"type":"TEXT_BLOCK_DELTA","reply_id":"...","block_id":"...","delta":"好"
             用于穿过反向代理，不携带数据。
           </li>
           <li>
-            服务端会先重放当前 run 的缓冲事件，再转入实时流；客户端要按 <code>reply_id</code> 去重，
-            不能假设同一条事件只来一次
-            <span class="src" data-src="src/agentscope/app/_router/_session.py:829">_session.py:829</span>。
+            服务端会先重放当前 run 的缓冲事件，再转入实时流；客户端要按事件 <code>id</code>
+            或回放游标去重，不能假设同一条事件只来一次
+            <span class="src" data-src="src/agentscope/app/_router/_session.py:953">_session.py:953</span>。
           </li>
           <li>
             断线重连可以带 <code>?after=&lt;cursor&gt;</code> 从游标之后重放
@@ -612,7 +614,7 @@ event.model_dump(mode="json")    # 事件同理</code></pre>
           持久化时通常保存两份东西：<strong>事件日志</strong>用于重放，<strong>最终 <code>Msg</code></strong>
           用于下一次模型调用和列表展示。服务层用 <code>append_event</code> 在内存里同时维护这两份，
           再做定期检查点
-          <span class="src" data-src="src/agentscope/app/_service/_chat.py:479">_chat.py:479</span>。
+          <span class="src" data-src="src/agentscope/app/_service/_chat.py:642">_chat.py:642</span>。
         </p>
 
         <h2 id="cheatsheet">速查表</h2>
@@ -681,8 +683,8 @@ event.model_dump(mode="json")    # 事件同理</code></pre>
           <p>
             服务端会先重放缓冲事件再转实时
             <span class="src" data-src="src/agentscope/app/_router/_session.py:829">_session.py:829</span>，
-            同一条事件可能被投递两次。按事件 <code>id</code> 或 <code>reply_id + block_id + 序号</code> 去重，
-            不要盲目追加。
+            同一条事件可能被投递两次。直接按事件 <code>id</code> 去重；
+            不要拿 <code>reply_id</code> 当唯一键，同一 reply 的所有事件共享它。
           </p>
         </div>
         <div class="callout tip">

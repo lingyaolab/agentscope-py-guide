@@ -5,13 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="AgentScope Python 2.0.11 中断、恢复与状态：AgentState 字段、序列化与恢复、运行中取消与挂起中断、未完成工具调用的关闭、reply(None) 继续、Redis/SQLAlchemy 存储与会话隔离。"
+      content="AgentScope Python 2.0.11 中断、恢复与状态：AgentState 字段、序列化与恢复、运行中取消与挂起中断、未完成工具调用的关闭、reply(None) 的边界、HITL 恢复事件、Redis/SQLAlchemy 存储与会话隔离。"
     />
     <meta property="og:type" content="article" />
     <meta property="og:locale" content="zh_CN" />
     <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
     <meta property="og:title" content="13 中断、恢复与状态：长任务不从头再来 · AgentScope Python 2.0.11 学习站" />
-    <meta property="og:description" content="AgentState 字段、序列化与恢复、运行中取消与挂起中断、未完成工具调用的关闭、reply(None) 继续、Redis/SQLAlchemy 存储与会话隔离。" />
+    <meta property="og:description" content="AgentState 字段、序列化与恢复、运行中取消与挂起中断、未完成工具调用的关闭、reply(None) 的边界、HITL 恢复事件、Redis/SQLAlchemy 存储与会话隔离。" />
     <title>13 中断、恢复与状态：长任务不从头再来 · AgentScope Python 2.0.11 学习站</title>
     <script>
       try {
@@ -38,7 +38,7 @@
         <ul class="goals">
           <li>说清 <code>AgentState</code> 里哪些字段必须一起保存</li>
           <li>区分「运行中取消」与「挂起中中断」，知道各自触发什么清理</li>
-          <li>用 <code>reply(None)</code> 和三类事件从断点继续</li>
+          <li>用三类恢复事件从断点继续，并知道 <code>reply(None)</code> 不能恢复 HITL</li>
           <li>用 <code>RedisStorage</code> 的 <code>get_session</code> / <code>update_session_state</code> 持久化会话</li>
         </ul>
 
@@ -67,7 +67,7 @@
         <p>
           <code>AgentState</code>
           <span class="src" data-src="src/agentscope/state/_state.py:209">_state.py:209</span>
-          是 Agent 唯一需要持久化的对象。它的字段大致分六组：
+          是 Agent 唯一需要持久化的对象。它的字段大致分八组：
         </p>
         <div class="table-wrap">
           <table>
@@ -256,7 +256,7 @@ async def interrupt_parked(agent) -&gt; None:
           这也是为什么中断不能只是「停止消费事件」——必须让 Agent 走到清理逻辑。
         </p>
 
-        <h2 id="resume">恢复：reply(None) 与三类事件</h2>
+        <h2 id="resume">恢复：三类事件，不是 reply(None)</h2>
         <p>
           <code>reply()</code> / <code>reply_stream()</code> 的 <code>inputs</code>
           除了消息，还接受三类恢复事件：
@@ -284,17 +284,31 @@ async def interrupt_parked(agent) -&gt; None:
               </tr>
               <tr>
                 <td><code>None</code></td>
-                <td>没有新输入，从当前状态继续</td>
+                <td>不用于恢复挂起回复；没有挂起时，用当前上下文开一轮新 reply</td>
               </tr>
             </tbody>
           </table>
         </div>
-        <pre><code>async def continue_reply(agent) -&gt; None:
-    msg = await agent.reply(None)
+        <div class="callout warn">
+          <span class="ct"><code>reply(None)</code> 不能恢复 HITL</span>
+          <p>
+            只要还有待确认或待外部执行的工具调用，<code>reply(None)</code> 会直接抛
+            <code>ValueError</code>
+            <span class="src" data-src="src/agentscope/agent/_agent.py:1884">_agent.py:1884</span>。
+            挂起的回复必须用对应事件（带原 <code>reply_id</code>）继续。
+          </p>
+        </div>
+        <pre><code>async def continue_reply(agent, event) -&gt; None:
+    # event 必须是 UserConfirmResultEvent / ExternalExecutionResultEvent /
+    # UserInterruptEvent；不能用 None 恢复挂起的 HITL
+    msg = await agent.reply(event)
     print(msg.finished_reason)</code></pre>
         <p>
-          <code>None</code> 适合「状态已经恢复、但还没有新消息」的场景。它会沿用当前
-          <code>reply_context</code>，继续原来的循环；如果 Agent 并没有挂起，它会按新的空输入继续推理。
+          没有挂起时，<code>reply(None)</code> 会走
+          <code>_handle_incoming_messages</code> 并创建新的 <code>ReplyContext</code>
+          <span class="src" data-src="src/agentscope/agent/_agent.py:1112">_agent.py:1112</span>：
+          新的 <code>reply_id</code>、<code>cur_iter=0</code>，只是复用当前上下文再推理一轮，
+          不是「继续原来那次回复」。
         </p>
         <h3>HITL 恢复要对上 reply_id</h3>
         <p>
@@ -476,7 +490,7 @@ async def load_state(user_id, agent_id, session_id) -&gt; AgentState:
               <tr><td>恢复状态</td><td><code>Agent(state=AgentState.model_validate_json(...))</code></td></tr>
               <tr><td>中断运行中</td><td><code>task.cancel()</code></td></tr>
               <tr><td>中断挂起中</td><td><code>UserInterruptEvent(reply_id=agent.state.reply_id)</code></td></tr>
-              <tr><td>从当前状态继续</td><td><code>await agent.reply(None)</code></td></tr>
+              <tr><td>空输入开新一轮</td><td><code>await agent.reply(None)</code>（不能恢复 HITL）</td></tr>
               <tr><td>恢复确认</td><td><code>UserConfirmResultEvent(reply_id=..., confirm_results=[...])</code></td></tr>
               <tr><td>Redis 读取</td><td><code>record = await storage.get_session(...)</code></td></tr>
               <tr><td>Redis 写入</td><td><code>await storage.update_session_state(...)</code></td></tr>

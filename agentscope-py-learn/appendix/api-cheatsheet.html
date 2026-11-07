@@ -128,8 +128,8 @@
                 <td>返回给模型的工具 schema 列表</td>
               </tr>
               <tr>
-                <td><code>await toolkit.call_tool(tool_call)</code><span class="src" data-src="src/agentscope/tool/_toolkit.py:225">_toolkit.py:225</span></td>
-                <td>执行一次工具调用</td>
+                <td><code>async for chunk in toolkit.call_tool(tool_call, agent.state)</code><span class="src" data-src="src/agentscope/tool/_toolkit.py:225">_toolkit.py:225</span></td>
+                <td>执行一次工具调用；第二个参数是 <code>AgentState</code></td>
               </tr>
               <tr>
                 <td><code>await toolkit.add_tool(tool)</code><span class="src" data-src="src/agentscope/tool/_toolkit.py:640">_toolkit.py:640</span></td>
@@ -141,7 +141,7 @@
               </tr>
               <tr>
                 <td><code>ToolBase</code></td>
-                <td>自定义工具基类：<code>name</code>、<code>description</code>、<code>input_schema</code>、<code>__call__</code></td>
+                <td>自定义工具基类：<code>name</code>、<code>description</code>、<code>input_schema</code>；子类覆写 <code>async def call(...)</code>（可选 <code>check_permissions</code>），<code>__call__</code> 是中间件包装层</td>
               </tr>
             </tbody>
           </table>
@@ -192,7 +192,7 @@
               <tr><td><code>on_check_permission</code><span class="src" data-src="src/agentscope/middleware/_base.py:170">_base.py:170</span></td><td>权限判定前后</td></tr>
               <tr><td><code>on_compress_context</code><span class="src" data-src="src/agentscope/middleware/_base.py:241">_base.py:241</span></td><td>上下文压缩判定</td></tr>
               <tr><td><code>on_system_prompt</code><span class="src" data-src="src/agentscope/middleware/_base.py:264">_base.py:264</span></td><td>系统提示变换（串行）</td></tr>
-              <tr><td><code>list_tools</code><span class="src" data-src="src/agentscope/middleware/_base.py:286">_base.py:286</span></td><td>可选的工具来源，不自动调用</td></tr>
+              <tr><td><code>list_tools</code><span class="src" data-src="src/agentscope/middleware/_base.py:286">_base.py:286</span></td><td>可选的工具来源；独立 <code>Agent</code> 不自动调用，Agent Service 会在组装 toolkit 时聚合</td></tr>
             </tbody>
           </table>
         </div>

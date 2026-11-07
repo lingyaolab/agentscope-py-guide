@@ -62,7 +62,7 @@
             <tbody>
               <tr><td>智能体</td><td>Agent</td><td>带模型、工具、状态与循环的执行者</td><td>02</td></tr>
               <tr><td>消息</td><td>Msg</td><td>一次输入或输出的容器，内容是 content blocks</td><td>03</td></tr>
-              <tr><td>内容块</td><td>ContentBlock</td><td>文本、思考、工具调用、工具结果、数据、提示的统一基类</td><td>03</td></tr>
+              <tr><td>内容块</td><td>ContentBlock</td><td>六种块的<strong>联合类型别名</strong>（TypeAlias），不是基类；块本身继承 Pydantic BaseModel</td><td>03</td></tr>
               <tr><td>文本块</td><td>TextBlock</td><td>纯文本片段</td><td>03</td></tr>
               <tr><td>思考块</td><td>ThinkingBlock</td><td>模型的推理过程，不一定展示给用户</td><td>03</td></tr>
               <tr><td>工具调用块</td><td>ToolCallBlock</td><td>模型要求执行某个工具及参数；1.x 叫 ToolUseBlock</td><td>03、05</td></tr>

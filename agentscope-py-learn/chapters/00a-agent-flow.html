@@ -127,7 +127,7 @@
               <tr><td><code>Permission</code></td><td>决定工具调用是放行、询问还是拒绝</td><td><code>Toolkit</code> / HITL</td></tr>
               <tr><td><code>Toolkit</code></td><td>执行工具，产出 <code>ToolResultBlock</code></td><td>下一轮上下文</td></tr>
               <tr><td><code>ChatModel 2</code></td><td>带着工具结果再次推理</td><td><code>AgentState</code></td></tr>
-              <tr><td><code>AgentState</code></td><td>保存上下文、reply id、usage</td><td>事件流 / 调用方</td></tr>
+              <tr><td><code>AgentState</code></td><td>保存上下文与 <code>reply_context</code>；usage 在最终 <code>Msg</code> 上</td><td>事件流 / 调用方</td></tr>
               <tr><td><code>Output</code></td><td>最终 <code>Msg</code> 与事件流</td><td>业务代码或前端</td></tr>
             </tbody>
           </table>
@@ -185,7 +185,8 @@
         </p>
         <ul class="goals">
           <li><code>Agent.reply_stream</code> 的公共入口：<span class="src" data-src="src/agentscope/agent/_agent.py:289">_agent.py:289</span></li>
-          <li>内部主循环 <code>_reply</code>：<span class="src" data-src="src/agentscope/agent/_agent.py:901">_agent.py:901</span></li>
+          <li>中间件入口 <code>_reply</code>：<span class="src" data-src="src/agentscope/agent/_agent.py:901">_agent.py:901</span></li>
+          <li>真正的 ReAct 主循环 <code>_reply_impl</code>：<span class="src" data-src="src/agentscope/agent/_agent.py:1036">_agent.py:1036</span></li>
           <li>模型调用与重试：<span class="src" data-src="src/agentscope/agent/_agent.py:3291">_agent.py:3291</span></li>
           <li>工具权限判定：<span class="src" data-src="src/agentscope/agent/_agent.py:2340">_agent.py:2340</span></li>
           <li>工具执行入口：<span class="src" data-src="src/agentscope/tool/_toolkit.py:225">_toolkit.py:225</span></li>

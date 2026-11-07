@@ -76,10 +76,10 @@
           </table>
         </div>
         <p>
-          AgentScope 提供七种工作区实现，共享同一套接口：
+          AgentScope 提供八种工作区实现，共享同一套接口：
           <code>LocalWorkspace</code>、<code>BubblewrapWorkspace</code>、<code>DockerWorkspace</code>、
           <code>E2BWorkspace</code>、<code>DaytonaWorkspace</code>、<code>K8sWorkspace</code>、
-          <code>OpenSandboxWorkspace</code>。
+          <code>OpenSandboxWorkspace</code>、<code>AppleContainerWorkspace</code>。
         </p>
 
         <h2 id="layers">三层：Workspace / Backend / Tool</h2>
@@ -206,7 +206,7 @@ async def build_agent(workspace, model) -&gt; Agent:
                 <td>已绑定后端的内置工具</td>
               </tr>
               <tr>
-                <td><code>mcps=await workspace.list_mcps(agent_id, session_id)</code></td>
+                <td><code>mcps=await workspace.list_mcps(agent_id=..., session_id=...)</code></td>
                 <td>按智能体 / 会话隔离的 MCP 客户端</td>
               </tr>
               <tr>
@@ -233,8 +233,8 @@ async def build_agent(workspace, model) -&gt; Agent:
         <p>
           <code>DockerWorkspace</code>
           <span class="src" data-src="src/agentscope/workspace/_docker/_docker_workspace.py:43">_docker_workspace.py:43</span>
-          把主机 <code>workdir</code> 挂到容器内 <code>/workspace</code>。容器重启后文件还在；
-          不传 <code>workdir</code> 就是纯临时容器。
+          把 <code>host_workdir</code> 挂到容器内 <code>/workspace</code>。容器重启后文件还在；
+          不传就使用临时文件层。<code>workdir</code> 是已废弃的兼容参数，会 warning。
         </p>
         <pre><code>from agentscope.workspace import DockerWorkspace
 
@@ -242,7 +242,7 @@ async def build_agent(workspace, model) -&gt; Agent:
 async def build_docker() -&gt; DockerWorkspace:
     workspace = DockerWorkspace(
         base_image="python:3.11-slim",
-        workdir="/data/docker-workspaces/agent-1",
+        host_workdir="/data/docker-workspaces/agent-1",
         node_version="20",
         extra_pip=["numpy", "pandas"],
     )
@@ -355,11 +355,11 @@ async def main() -&gt; None:
               </tr>
               <tr>
                 <td><code>Glob</code></td>
-                <td>按文件名搜索，默认搜索目录是 <code>workdir</code></td>
+                <td>按文件名搜索；默认是 backend 的 cwd（本地 backend 即进程 cwd），建议显式传 <code>path=workdir</code></td>
               </tr>
               <tr>
                 <td><code>Grep</code></td>
-                <td>按内容搜索，默认搜索目录是 <code>workdir</code></td>
+                <td>按内容搜索；默认是 backend 的 cwd，建议显式传 <code>path=workdir</code></td>
               </tr>
               <tr>
                 <td><code>Read</code></td>
@@ -401,12 +401,12 @@ bash = Bash(backend=workspace.get_backend())</code></pre>
             <tbody>
               <tr>
                 <td>MCP</td>
-                <td><code>list_mcps(agent_id, session_id)</code><span class="src" data-src="src/agentscope/workspace/_base.py:605">_base.py:605</span></td>
+                <td><code>list_mcps(agent_id=..., session_id=...)</code><span class="src" data-src="src/agentscope/workspace/_base.py:605">_base.py:605</span></td>
                 <td><code>add_mcp()</code> / <code>remove_mcp()</code></td>
               </tr>
               <tr>
                 <td>技能</td>
-                <td><code>list_skills(agent_id)</code><span class="src" data-src="src/agentscope/workspace/_base.py:1204">_base.py:1204</span></td>
+                <td><code>list_skills(agent_id=...)</code><span class="src" data-src="src/agentscope/workspace/_base.py:1204">_base.py:1204</span></td>
                 <td><code>add_skill()</code> / <code>remove_skill()</code></td>
               </tr>
             </tbody>
@@ -428,16 +428,16 @@ bash = Bash(backend=workspace.get_backend())</code></pre>
         </p>
         <pre><code>主机                                     容器 / 云沙箱
 ┌──────────────┐                        ┌────────────────────┐
-│ Agent        │   HTTPS + Bearer       │  MCP 网关 (FastAPI) │
+│ Agent        │  回环 HTTP              │  MCP 网关 (FastAPI) │
 │ Toolkit      │ ─────────────────────▶ │    ├─ MCP 1 (stdio) │
 │ GatewayMCP.. │                        │    ├─ MCP 2 (http)  │
 └──────────────┘                        │    └─ MCP N         │
                                         └────────────────────┘</code></pre>
         <ul>
           <li>网关只监听沙箱回环地址，不对外发布端口</li>
-          <li>每次 <code>initialize()</code> 生成工作区专属 Bearer 令牌</li>
+          <li>只有 <code>BubblewrapWorkspace</code> 每次 <code>initialize()</code> 生成工作区专属 Bearer 令牌；Docker / E2B / K8s 等网关在回环上运行，默认不带额外鉴权</li>
           <li>主机侧用 <code>GatewayMCPClient</code> / <code>GatewayMCPTool</code> 适配，接口仍是 <code>MCPClient</code></li>
-          <li>主机到网关的调用通过后端的 <code>exec_shell</code> 发 curl，不是直接连端口</li>
+          <li>主机到网关的调用通过后端 <code>exec_shell</code> 执行内置 Python shim，不是直接连端口，也不是 <code>curl</code></li>
         </ul>
         <p>
           所以 <code>list_mcps()</code> 在所有后端上返回的都是 <code>MCPClient</code> 实例，

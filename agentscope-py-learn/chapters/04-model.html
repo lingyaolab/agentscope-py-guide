@@ -340,7 +340,8 @@ asyncio.run(main())</code></pre>
         <p>
           <code>DeepSeekChatModel.Parameters</code>
           <span class="src" data-src="src/agentscope/model/_deepseek/_model.py:29">_model.py:29</span>
-          里全是可选字段，默认 <code>None</code>：
+          大多数字段可选且默认 <code>None</code>，但 <code>thinking_enable</code> 默认
+          <code>False</code>：
         </p>
         <div class="table-wrap">
           <table>
@@ -375,7 +376,7 @@ asyncio.run(main())</code></pre>
               <tr>
                 <td><code>top_p</code></td>
                 <td><code>None</code><span class="src" data-src="src/agentscope/model/_deepseek/_model.py:68">_model.py:68</span></td>
-                <td>范围 0–1；<code>None</code> 表示不发送</td>
+                <td>范围 <code>0 &lt; top_p ≤ 1</code>；<code>None</code> 表示不发送</td>
               </tr>
             </tbody>
           </table>
@@ -642,7 +643,7 @@ for card in DeepSeekCredential.list_models():
                 <td>DeepSeek</td>
                 <td><code>DeepSeekCredential</code></td>
                 <td><code>DeepSeekChatModel</code></td>
-                <td>base URL 固定，通常只需 key</td>
+                <td>默认 <code>https://api.deepseek.com</code>，<code>base_url</code> 可改（代理 / 私有网关）</td>
               </tr>
               <tr>
                 <td>OpenAI / 兼容</td>

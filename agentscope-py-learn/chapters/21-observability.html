@@ -273,9 +273,13 @@ agent = Agent(
           <li><code>agentscope.agent.incoming_event_type</code>：恢复时是确认结果还是外部执行结果</li>
         </ul>
         <p>
-          属性来自
+          请求属性来自
           <span class="src" data-src="src/agentscope/middleware/_tracing/_extractor.py:459">_extractor.py:459</span>，
-          键名常量定义在
+          输出消息来自
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_extractor.py:527">_extractor.py:527</span>，
+          <code>reply_id</code> / HITL / 外部执行属性在
+          <span class="src" data-src="src/agentscope/middleware/_tracing/_trace.py:231">_trace.py:231</span>
+          写入；键名常量在
           <span class="src" data-src="src/agentscope/middleware/_tracing/_attributes.py:8">_attributes.py:8</span>
           的 <code>SpanAttributes</code> 里。
         </p>
@@ -493,7 +497,8 @@ async def enrich_profile(profile_id: str) -&gt; dict:
         <p>
           另外还有 <code>model.count_tokens(messages, tools)</code>
           <span class="src" data-src="src/agentscope/model/_base.py:379">_base.py:379</span>，
-          但它默认按「字节数 / 4」估算，只用于上下文压缩判断，<strong>不能当账单</strong>。
+          但它默认按「UTF-8 字节数 / 4」估算文本，另加每个 <code>DataBlock</code> 2000 token，
+          并把工具 schema 的 JSON 也计入；只用于上下文压缩判断，<strong>不能当账单</strong>。
         </p>
         <p>
           CLI / TUI 里看到的那行 <code>tokens: 1234 in / 567 out</code>
@@ -571,7 +576,7 @@ class CostMiddleware(MiddlewareBase):
      + output_token_weight * output_tokens</code></pre>
         <p>累计成本达到上限后，它会做两件事：</p>
         <ol>
-          <li>往上下文最后一条助手消息追加一个 <code>HintBlock</code>，提醒模型收尾</li>
+          <li>往上下文最后一条<strong>本 Agent 的</strong>助手消息追加一个 <code>HintBlock</code>；如果没有，就新建一条 <code>AssistantMsg</code></li>
           <li>把下一步 <code>tool_choice</code> 强制设成 <code>none</code>，禁止继续调工具</li>
         </ol>
         <p>

@@ -319,7 +319,7 @@ Accept: text/event-stream</code></pre>
             <tbody>
               <tr><td><code>GET /sessions/{id}/messages</code></td><td>分页拉取消息</td></tr>
               <tr><td><code>POST /sessions/{id}/interrupt</code></td><td>中断运行中或 HITL 暂停的回复</td></tr>
-              <tr><td><code>GET /sessions/{id}/status</code></td><td>running / parked / idle / gone</td></tr>
+              <tr><td><code>GET /sessions/{id}/status</code></td><td>running / idle / awaiting_permission / awaiting_external_result</td></tr>
               <tr><td><code>GET /agent/schema/v2</code></td><td>前端渲染 Agent 表单的 JSON Schema</td></tr>
               <tr><td><code>GET /model?provider=...</code></td><td>某 provider 的模型卡片</td></tr>
             </tbody>
@@ -351,7 +351,7 @@ Accept: text/event-stream</code></pre>
         <h3>会话来源</h3>
         <p>
           <code>SessionRecord.origin</code> 是带 tag 的联合类型：
-          <code>user</code>、<code>schedule</code>、<code>channel</code>、<code>team</code>。
+          <code>user</code>、<code>schedule</code>、<code>channel</code>、<code>team</code>、<code>sop</code>。
           判断来源用 <code>isinstance(record.origin, ChannelOrigin)</code>，不用再检查 id 是否自洽。
         </p>
 
@@ -469,7 +469,7 @@ app.dependency_overrides[default_dependency] = my_jwt_user_id</code></pre>
           </li>
           <li>
             <code>ToolOffloadMiddleware</code>
-            <span class="src" data-src="src/agentscope/app/middleware/__init__.py:8">__init__.py:8</span>：
+            <span class="src" data-src="src/agentscope/app/middleware/__init__.py:9">__init__.py:9</span>：
             工具超时后转后台，完成时通过消息总线回送
           </li>
           <li>

@@ -370,7 +370,7 @@ agent = Agent(
           先装可选依赖（本地声卡依赖 PortAudio，Linux 需要
           <code>libportaudio2</code>）：
         </p>
-        <pre><code>pip install "agentscope[realtime]"</code></pre>
+        <pre><code>pip install "agentscope[realtime,realtime-local]"</code></pre>
         <pre><code>import os
 
 from agentscope.agent import RealtimeAgent
@@ -441,7 +441,7 @@ async def main() -&gt; None:
               <tr><td><code>DataBlockDeltaEvent</code></td><td>回复音频增量，通常已由传输播放</td></tr>
               <tr><td><code>ToolCallStartEvent</code> / <code>ToolResultEndEvent</code></td><td>工具调用与结果</td></tr>
               <tr><td><code>RequireUserConfirmEvent</code></td><td>工具调用需要确认</td></tr>
-              <tr><td><code>ReplyEndEvent</code></td><td>一次回复结束；<code>role</code> 区分双方</td></tr>
+              <tr><td><code>ReplyEndEvent</code></td><td>一次回复结束；没有 <code>role</code>，用 <code>reply_id</code> 区分双方</td></tr>
             </tbody>
           </table>
         </div>
@@ -450,32 +450,35 @@ async def main() -&gt; None:
           工具调用后的续答与原回复共享同一个逻辑 <code>reply_id</code>。
         </p>
 
-        <h2 id="barge">打断与截断：用户听到哪里，上下文就保留到哪里</h2>
+        <h2 id="barge">打断：清空播放、取消回复，但不会自动截断上下文</h2>
         <p>
-          用户在回复播放期间开口，智能体会立即停止播放并取消模型侧回复。
-          关键在「停在哪里」：
+          用户在回复播放期间开口，<code>RealtimeAgent</code> 会立即停止播放并取消模型侧回复。
+          但 2.0.11 的实现比文档描述得更保守：
         </p>
         <ol>
-          <li>传输的 <code>clear_audio()</code> 返回 <code>PlayoutPosition</code>
-            <span class="src" data-src="src/agentscope/realtime/_playout.py:6">_playout.py:6</span>，
-            <code>played_ms</code> 是这条回复实际播放到的毫秒数</li>
-          <li>智能体据此把上下文里的助手消息截到用户真正听到的部分
-            <span class="src" data-src="src/agentscope/agent/_realtime/_agent.py:647">_agent.py:647</span></li>
-          <li>被打断的回复以 <code>finished_reason=interrupted</code> 结束</li>
-          <li>文本块的 <code>TextBlockEndEvent.text</code>
-            <span class="src" data-src="src/agentscope/event/_event.py:192">_event.py:192</span>
-            给出截断后的最终文本</li>
+          <li>它调用传输的 <code>clear_audio()</code> 清空未播放音频
+            <span class="src" data-src="src/agentscope/agent/_realtime/_agent.py:649">_agent.py:649</span>，
+            但<strong>丢弃</strong>了返回的 <code>PlayoutPosition</code></li>
+          <li>取消模型响应，并把当前回复标记为
+            <code>finished_reason=interrupted</code></li>
+          <li><strong>不会</strong>按 <code>played_ms</code> 自动裁剪本地上下文，
+            也<strong>不会</strong>给 <code>TextBlockEndEvent.text</code> 填截断后的文本
+            <span class="src" data-src="src/agentscope/agent/_realtime/_agent.py:977">_agent.py:977</span></li>
         </ol>
         <p>
-          为什么要这么麻烦？因为文本增量比音频先到。用户只听到半句话，
-          但前端可能已经收到整段文字；如果上下文保留完整回复，模型会「以为」用户听完了。
+          所以「用户听到哪里，上下文就保留到哪里」目前要你自己做：
+          在调用 <code>interrupt()</code> / 触发 barge-in 前后读取
+          <code>transport.playout.played_ms</code>（或自己调 <code>clear_audio()</code> 拿返回值），
+          再按音频时长裁剪最后一条助手消息的文本。字段定义在
+          <code>PlayoutPosition</code>
+          <span class="src" data-src="src/agentscope/realtime/_playout.py:6">_playout.py:6</span>。
         </p>
         <div class="callout warn">
-          <span class="ct">模型侧不一定能截断</span>
+          <span class="ct">模型侧也不一定截断</span>
           <p>
-            智能体侧上下文一定会截断，但模型服务端取决于协议：OpenAI Realtime 接受显式截断，
-            Gemini Live 由服务端处理，DashScope 与 xAI 不接受截断指令，
-            模型侧仍保留完整回复。跨模型对比时要考虑这个差异。
+            OpenAI Realtime 接受显式截断，Gemini Live 由服务端处理，
+            DashScope 与 xAI 不接受截断指令。即使你在本地裁了上下文，
+            模型侧仍可能保留完整回复，跨模型对比时要注意。
           </p>
         </div>
         <p>
@@ -722,7 +725,7 @@ agent = RealtimeAgent(
               </tr>
             </thead>
             <tbody>
-              <tr><td>安装语音依赖</td><td><code>pip install "agentscope[realtime]"</code></td></tr>
+              <tr><td>安装语音依赖</td><td><code>pip install "agentscope[realtime,realtime-local]"</code></td></tr>
               <tr><td>文本转语音</td><td><code>tts.synthesize(text)</code></td></tr>
               <tr><td>流式输入 TTS</td><td><code>async with tts: push(delta); synthesize()</code></td></tr>
               <tr><td>给文本 Agent 配音</td><td><code>middlewares=[TTSMiddleware(tts)]</code></td></tr>
@@ -753,7 +756,7 @@ agent = RealtimeAgent(
         <div class="callout warn">
           <span class="ct">以为打断会把模型侧上下文也截断</span>
           <p>
-            AgentScope 侧一定截断，模型侧看协议。DashScope 与 xAI 不支持截断指令，
+            2.0.11 连本地上下文也不会自动截断；模型侧更看协议。DashScope 与 xAI 不支持截断指令，
             模型仍记得完整回复。
           </p>
         </div>
@@ -774,8 +777,9 @@ agent = RealtimeAgent(
         <div class="callout warn">
           <span class="ct">把整段文本当用户听到的内容</span>
           <p>
-            文本增量先于音频到达。打断时必须用 <code>played_ms</code> 截断上下文，
-            并用 <code>TextBlockEndEvent.text</code> 覆盖已经发出的文本。
+            文本增量先于音频到达。2.0.11 不会自动截断上下文，也不会填
+            <code>TextBlockEndEvent.text</code>；需要自己用 <code>played_ms</code> 裁剪，
+            并同步覆盖前端已显示的文本。
           </p>
         </div>
         <div class="callout tip">

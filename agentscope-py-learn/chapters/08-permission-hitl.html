@@ -107,12 +107,12 @@
               </tr>
               <tr>
                 <td><code>EXPLORE</code><span class="src" data-src="src/agentscope/permission/_types.py:83">_types.py:83</span></td>
-                <td>只读放行，任何修改都拒绝</td>
+                <td>只读默认放行；修改默认拒绝，但匹配的 ask / deny 规则优先</td>
                 <td>代码探索、做方案</td>
               </tr>
               <tr>
                 <td><code>BYPASS</code><span class="src" data-src="src/agentscope/permission/_types.py:84">_types.py:84</span></td>
-                <td>跳过安全检查，只剩 deny / ask 规则</td>
+                <td>跳过自动 ASK；工具自己返回的 DENY 与用户配置的 deny / ask 规则仍生效</td>
                 <td>沙箱、完全可信环境</td>
               </tr>
               <tr>
@@ -283,7 +283,7 @@ permission_context = PermissionContext(
 )</code></pre>
         <p>
           把它挂到 Agent 上，是通过 <code>AgentState.permission_context</code>
-          <span class="src" data-src="src/agentscope/permission/_context.py:31">_context.py:31</span>：
+          <span class="src" data-src="src/agentscope/state/_state.py:274">_state.py:274</span>：
         </p>
         <pre><code>from agentscope.agent import Agent
 from agentscope.state import AgentState
@@ -323,7 +323,7 @@ agent.state.permission_context.mode = PermissionMode.EXPLORE</code></pre>
             <tbody>
               <tr><td><code>DEFAULT</code> / <code>ACCEPT_EDITS</code></td><td>尊重；allow 规则不能覆盖</td></tr>
               <tr><td><code>EXPLORE</code></td><td>不适用（只读路径不调用工具检查）</td></tr>
-              <tr><td><code>BYPASS</code></td><td><strong>故意忽略</strong>；只剩 deny / ask 规则</td></tr>
+              <tr><td><code>BYPASS</code></td><td><strong>跳过自动 ASK</strong>；工具 DENY 与用户 deny / ask 规则仍生效</td></tr>
               <tr><td><code>DONT_ASK</code></td><td>转成 DENY</td></tr>
             </tbody>
           </table>
@@ -453,10 +453,10 @@ resume = ExternalExecutionResultEvent(
           换个参数、换工具，或者直接向用户解释。
         </p>
         <p>
-          如果你希望「被拒绝就停止整轮」，把 <code>ReActConfig.stop_on_reject</code> 设为
-          <code>True</code>
-          <span class="src" data-src="src/agentscope/agent/_config.py:385">_config.py:385</span>；
-          默认是 <code>False</code>，模型可以继续尝试别的办法。
+          <code>ReActConfig</code> 里有 <code>stop_on_reject</code>
+          <span class="src" data-src="src/agentscope/agent/_config.py:385">_config.py:385</span>，
+          但 2.0.11 的 <code>_agent.py</code> 还没有读取它：设成 <code>True</code> 也不会在当前版本停止整轮。
+          需要停止时，自己在中间件或调用方根据 <code>DENIED</code> 的工具结果结束。
         </p>
         <div class="callout tip">
           <span class="ct">拒绝信息要写清楚</span>
@@ -486,7 +486,11 @@ resume = ExternalExecutionResultEvent(
           </table>
         </div>
         <p>ACCEPT_EDITS 配合工作目录：</p>
-        <pre><code>from agentscope.permission import AdditionalWorkingDirectory, PermissionContext
+        <pre><code>from agentscope.permission import (
+    AdditionalWorkingDirectory,
+    PermissionContext,
+    PermissionMode,
+)
 
 PermissionContext(
     mode=PermissionMode.ACCEPT_EDITS,
@@ -542,10 +546,11 @@ PermissionContext(
           </p>
         </div>
         <div class="callout warn">
-          <span class="ct">恢复时 <code>reply_id</code> 对不上</span>
+          <span class="ct">恢复时对不上的不是 <code>reply_id</code></span>
           <p>
-            <code>UserConfirmResultEvent.reply_id</code> 必须与暂停事件一致，否则 Agent 无法把结果
-            关联回等待中的工具调用。跨请求保存时，把 <code>reply_id</code> 一起存。
+            独立 Agent 按 <code>tool_call.id</code> 匹配等待中的确认，不比较 <code>reply_id</code>；
+            <code>reply_id</code> 用于会话 / 流水线路由。跨请求保存时，两个都要存，
+            但不要指望改 <code>reply_id</code> 能“骗过” Agent。
           </p>
         </div>
         <div class="callout tip">

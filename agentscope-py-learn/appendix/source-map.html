@@ -121,7 +121,7 @@
               <tr><td><code>tool/_base.py</code></td><td><code>ToolBase</code>、<code>ParamsBase</code>、工具中间件</td></tr>
               <tr><td><code>tool/_adapters.py</code></td><td><code>FunctionTool</code>、<code>MCPTool</code></td></tr>
               <tr><td><code>tool/_builtin/</code></td><td>Bash、Edit、Glob、Grep、Read、Write 与沙箱后端</td></tr>
-              <tr><td><code>tool/_task.py</code></td><td>TaskCreate / TaskGet / TaskList / TaskUpdate</td></tr>
+              <tr><td><code>tool/_task/</code></td><td>TaskCreate / TaskGet / TaskList / TaskUpdate</td></tr>
               <tr><td><code>mcp/</code></td><td>MCP 客户端、stdio / http 配置</td></tr>
             </tbody>
           </table>
@@ -192,7 +192,8 @@
               <tr><td><code>workspace/_sandboxed_base.py</code></td><td>Docker / E2B 等沙箱基类</td></tr>
               <tr><td><code>rag/_knowledge.py</code></td><td><code>KnowledgeBase.search</code> / 文档管理</td></tr>
               <tr><td><code>rag/_vdb/</code></td><td>Qdrant / Milvus / MongoDB / Elasticsearch 向量库</td></tr>
-              <tr><td><code>app/rag/</code></td><td>知识库管理器、索引 worker、文档解析</td></tr>
+              <tr><td><code>app/rag/</code></td><td>知识库管理器、索引 worker、blob store</td></tr>
+              <tr><td><code>rag/_parser/</code></td><td>PDF / Word / Excel / PPT 等文档解析</td></tr>
             </tbody>
           </table>
         </div>

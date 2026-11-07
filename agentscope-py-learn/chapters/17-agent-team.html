@@ -290,11 +290,20 @@
               <tr><td><code>type</code><span class="src" data-src="src/agentscope/app/_types.py:132">_types.py:132</span></td><td>模板标识，成为 <code>subagent_type</code> 的枚举值</td></tr>
               <tr><td><code>description</code><span class="src" data-src="src/agentscope/app/_types.py:140">_types.py:140</span></td><td>给 Leader 看的选择依据</td></tr>
               <tr><td><code>system_prompt_template</code><span class="src" data-src="src/agentscope/app/_types.py:148">_types.py:148</span></td><td>Worker 系统提示模板</td></tr>
-              <tr><td><code>permission_context</code><span class="src" data-src="src/agentscope/app/_types.py:167">_types.py:167</span></td><td>角色权限边界，比如 <code>EXPLORE</code></td></tr>
+              <tr><td><code>permission_context</code><span class="src" data-src="src/agentscope/app/_types.py:167">_types.py:167</span></td><td>角色权限边界，比如 <code>EXPLORE</code>；只有 <code>override_leader_mode=True</code> 时才覆盖 Leader</td></tr>
+              <tr><td><code>override_leader_mode</code><span class="src" data-src="src/agentscope/app/_types.py:176">_types.py:176</span></td><td>默认 <code>False</code>，Worker 继承 Leader 当前模式；要强制只读必须设为 <code>True</code></td></tr>
               <tr><td><code>context_config</code> / <code>react_config</code></td><td>上下文与循环配置</td></tr>
               <tr><td><code>tasks_context</code><span class="src" data-src="src/agentscope/app/_types.py:214">_types.py:214</span></td><td>预置任务</td></tr>
             </tbody>
           </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct">模板权限默认不生效</span>
+          <p>
+            <code>override_leader_mode</code> 默认 <code>False</code>，Worker 会继承 Leader
+            当前的权限模式。只写 <code>PermissionContext(mode=EXPLORE)</code> 而不加
+            <code>override_leader_mode=True</code>，explorer 仍然可能拿到 Leader 的写权限。
+          </p>
         </div>
         <p>系统提示模板支持五个占位符：</p>
         <pre><code>{team_name}          {team_description}
@@ -320,6 +329,7 @@ app = create_app(
             permission_context=PermissionContext(
                 mode=PermissionMode.EXPLORE,
             ),
+            override_leader_mode=True,
         ),
     ],
 )</code></pre>
@@ -345,7 +355,7 @@ app = create_app(
         <ul>
           <li>Worker 停在确认上时，请求原样流到它的会话流</li>
           <li>答复按 <code>reply_id</code> 路由回该 Worker</li>
-          <li>Worker 挂起期间，Leader 停在对应的分派上，等它完成再继续</li>
+          <li>Worker 挂起时，Leader 这一轮不会替它继续；结果通过 <code>TeamSay</code> / 唤醒回到 Leader（SDK 的 <code>TeamPipeline</code> 则是停在分派上等成员完成）</li>
           <li>其他未挂起的 Worker 照常跑完，已完成结果先交回 Leader</li>
         </ul>
         <p>
@@ -448,7 +458,7 @@ app = create_app(
               <tr><td>建团队</td><td><code>TeamCreate</code>（Leader 自动调用）</td></tr>
               <tr><td>派生 Worker</td><td><code>AgentCreate(name=..., description=..., prompt=...)</code></td></tr>
               <tr><td>邀请已有 Agent</td><td><code>AgentInvite</code></td></tr>
-              <tr><td>给成员发消息</td><td><code>TeamSay(to=..., message=...)</code></td></tr>
+              <tr><td>给成员发消息</td><td><code>TeamSay(to=..., content=...)</code></td></tr>
               <tr><td>解散</td><td><code>TeamDelete</code></td></tr>
               <tr><td>注册角色模板</td><td><code>custom_subagent_templates=[SubAgentTemplate(...)]</code></td></tr>
               <tr><td>让 Agent 可被邀请</td><td>设 <code>Invitable=true</code> + <code>Invite description</code></td></tr>

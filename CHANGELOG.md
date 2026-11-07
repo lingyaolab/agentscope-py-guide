@@ -2,6 +2,19 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.29.0 — 2026-11-07
+
+全站内容对照 2.0.11 源码做语义审查，修正 80+ 处事实、API 与默认值问题。
+
+- **Agent / 消息 / 事件**：`reply(None)` 不能恢复 HITL；事件去重按 `id`；`append_event` 还会写 `finished_reason` / `error` 与工具状态；`allowed` 中间态；SSE 201 与 per-process 409。
+- **模型 / 工具**：`FunctionTool` 默认 ASK 且 `is_read_only` 不自动放行；`ToolBase` 覆写 `call()`；`ResetTools` 类名与 `reset_tools` 工具名；`tool_choice` 结构化输出例外；DeepSeek `top_p` 范围与可配置 `base_url`。
+- **权限 / 中间件**：`stop_on_reject` 在 2.0.11 尚未生效；BYPASS / EXPLORE 的 deny / ask 优先级；确认按 `tool_call.id` 关联；`on_check_permission` 的 `tool` 是活实例。
+- **Workspace / 服务**：`host_workdir` 替代 `workdir`；Glob/Grep 默认 backend cwd；只有 Bubblewrap 有 per-launch Bearer；`list_mcps` / `list_skills` 仅限关键字；八种 workspace；SessionStatus 四值；`origin` 增加 `sop`。
+- **实时语音**：2.0.11 打断只清播放并取消，不自动裁剪上下文，也不填 `TextBlockEndEvent.text`；`ReplyEndEvent` 无 `role`；本地声卡需 `[realtime,realtime-local]`。
+- **安全与部署**：凭证 / 渠道 / MCP 记录当前是明文，仅 API 脱敏；`/health` 缺 header 是 422；Docker 镜像需 `[service,storage-redis]`；MCP Hub 安装不测连接。
+- **A2A / Capstone / 附录**：修正载荷分派、TypeError 行号；`extra_agent_tools` 必须 async；技能装配端点；`Toolkit.call_tool` 需要 state；`ContentBlock` 是联合类型；Java Service 是 Java Gateway/Dataplane + Go Control。
+- **校验**：127 个 Python 代码块全部 `py_compile` 通过，agentscope 导入全部可解析；35 个页面浏览器巡检无 console 错误。
+
 ## v0.28.2 — 2026-11-07
 
 入口与搜索易用性补强。

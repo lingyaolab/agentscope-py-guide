@@ -362,8 +362,12 @@ async def build_agentic(kb):
 
         <h2 id="memory">长期记忆：三种中间件</h2>
         <p>
-          长期记忆都实现为 <code>MiddlewareBase</code> 子类，挂到 <code>Agent(middlewares=[...])</code> 上。
-          它们都会在回复后写回、在回复前或模型主动调用时检索。
+          长期记忆都实现为 <code>MiddlewareBase</code> 子类，挂到 <code>Agent(middlewares=[...])</code> 上，
+          但写回与检索时机不同：
+          Agentic Memory 由模型通过 Read / Write / Edit 自主决定保存什么；
+          Mem0 只有在 <code>static_control</code> / <code>both</code> 模式下才自动写回，
+          <code>agent_control</code> 不自动检索或写回；ReMe 会在回复后自动写回并在后续检索。
+          具体行为以各自的 <code>Parameters</code> 为准。
         </p>
         <h3>Agentic Memory：Markdown 文件</h3>
         <p>

@@ -105,11 +105,12 @@ X-User-ID: alice
   }
 }
 
-→ 200 {"session_id": "session-xxx"}</code></pre>
+→ 201 {"session_id": "session-xxx"}</code></pre>
         <p>
-          一个 <code>(user_id, agent_id, workspace_id)</code> 三元组最多只有一个会话：
-          同样的三元组再建一次，会<strong>更新</strong>已有会话，而不是新建
-          <span class="src" data-src="src/agentscope/app/_router/_session.py:303">_session.py:303</span>。
+          不传 <code>session_id</code> 时，每次 <code>POST /sessions</code> 都会<strong>新建</strong>会话，
+          同一 <code>(user_id, agent_id)</code> 也可以有多个会话
+          <span class="src" data-src="src/agentscope/app/_router/_session.py:290">_session.py:290</span>。
+          要更新已有会话，用 <code>PATCH /sessions/{id}</code>，或在创建时显式带 <code>session_id</code>。
         </p>
 
         <h2 id="chat">触发运行</h2>
@@ -150,8 +151,9 @@ X-User-ID: alice
         <div class="callout warn">
           <span class="ct">同一会话同时只能跑一次</span>
           <p>
-            会话被某个 worker 持有运行锁时，第二次 <code>POST /chat</code> 返回
-            HTTP 409。要并行，用多个会话。
+            同一进程里，如果该会话已有在途 run，第二次 <code>POST /chat</code> 返回
+            HTTP 409；跨进程时由消息总线的会话锁串行化，后到请求会等待，而不是立刻 409。
+            要真正并行，用多个会话。
           </p>
         </div>
 
@@ -416,8 +418,8 @@ app = create_app(
             新事件类型要能静默跳过。
           </li>
           <li>
-            <strong>去重</strong>：重连时回放与实时可能重叠，按事件 <code>id</code> 或
-            <code>_entry_id</code> 去重。
+            <strong>去重</strong>：重连时回放与实时可能重叠，按事件 <code>id</code> 去重；
+            <code>_entry_id</code> 是服务端游标，不会出现在 SSE 帧里。
           </li>
           <li>
             <strong>状态驱动 UI</strong>：用 <code>/status</code> 的四个值决定
@@ -484,8 +486,10 @@ app = create_app(
         <div class="callout warn">
           <span class="ct">中断后立刻再发</span>
           <p>
-            202 只表示「已请求取消」。运行锁还没释放时再发会 409。
-            等 <code>/status</code> 变成非 <code>running</code>。
+            202 只表示「已请求取消」。本进程的注册表还没释放时再发会 409；
+            跨进程时消息总线的会话锁会让请求等待。
+            等 <code>/status</code> 不再是 <code>running</code> / <code>awaiting_permission</code> /
+            <code>awaiting_external_result</code>。
           </p>
         </div>
         <div class="callout tip">

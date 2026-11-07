@@ -117,8 +117,8 @@ tool = FunctionTool(count_up, is_read_only=True)</code></pre>
                 <td>同步生成器，框架转成异步流</td>
               </tr>
               <tr>
-                <td>其他类型</td>
-                <td>抛 <code>DeveloperOrientedException</code></td>
+                <td>其他普通返回值（str / dict / list 等）</td>
+                <td>自动包装成 <code>ToolChunk</code>；只有自定义 <code>ToolBase.call()</code> 返回不支持的类型才会抛 <code>DeveloperOrientedException</code></td>
               </tr>
             </tbody>
           </table>
@@ -343,16 +343,17 @@ toolkit = Toolkit(
 )</code></pre>
         <p>
           非 <code>basic</code> 组必须有 <code>description</code>
-          <span class="src" data-src="src/agentscope/tool/_tool_group.py:10">_tool_group.py:10</span>，
-          因为模型要靠它判断「什么时候该激活这个组」。只要存在额外组，框架会自动注册一个元工具
-          <code>ResetTools</code>
-          <span class="src" data-src="src/agentscope/tool/_toolkit.py:500">_toolkit.py:500</span>，
+          <span class="src" data-src="src/agentscope/tool/_tool_group.py:71">_tool_group.py:71</span>，
+          因为模型要靠它判断「什么时候该激活这个组」。只要存在额外组，框架会自动注册元工具
+          <code>reset_tools</code>（类名 <code>ResetTools</code>）
+          <span class="src" data-src="src/agentscope/tool/_builtin/_meta.py:21">_meta.py:21</span>，
           让模型自己开关工具组。
         </p>
         <h3>运行时增删</h3>
-        <pre><code>await toolkit.add_tool(MyTool())              # 默认加入 basic
-await toolkit.add_tool(MyTool(), "browser")   # 加入指定组
-await toolkit.remove_tool("MyTool")</code></pre>
+        <pre><code>async def manage_tools(toolkit):
+    await toolkit.add_tool(MyTool())              # 默认加入 basic
+    await toolkit.add_tool(MyTool(), "browser")   # 加入指定组
+    await toolkit.remove_tool("MyTool")</code></pre>
         <p>
           同名工具会<strong>覆盖</strong>旧工具，只记一条 warning
           <span class="src" data-src="src/agentscope/tool/_toolkit.py:660">_toolkit.py:660</span>。
@@ -474,8 +475,9 @@ D.is_concurrency_safe = True
         <p>
           最后一定会 yield 一个完整的 <code>ToolResponse</code>
           <span class="src" data-src="src/agentscope/tool/_toolkit.py:390">_toolkit.py:390</span>，
-          它把前面所有 chunk 按 block id 合并，并保留最严重的状态（error &gt; interrupted &gt; denied &gt; success）
-          <span class="src" data-src="src/agentscope/tool/_response.py:51">_response.py:51</span>。
+          它把前面所有 chunk 按 block id 合并；<code>error</code> 永远优先，
+          <code>interrupted</code> 与 <code>denied</code> 之间则是后到的覆盖先到的
+          <span class="src" data-src="src/agentscope/tool/_response.py:138">_response.py:138</span>。
         </p>
         <div class="callout tip">
           <span class="ct">抛异常也是一种「给模型的提示」</span>
@@ -738,7 +740,7 @@ client = MCPClient(
         <h2 id="exercise">20 分钟动手练习</h2>
         <ol>
           <li>把 02 章的 <code>get_weather</code> 改写成继承 <code>ToolBase</code> 的类，并实现一个只允许特定城市的 <code>check_permissions</code>。</li>
-          <li>给工具加一个 <code>ToolGroup</code>，观察模型是否会先调用 <code>ResetTools</code> 激活它。</li>
+          <li>给工具加一个 <code>ToolGroup</code>，观察模型是否会先调用 <code>reset_tools</code> 激活它。</li>
           <li>写一个会抛异常的工具，确认模型收到的是可读错误文本，而不是整轮失败。</li>
         </ol>
 

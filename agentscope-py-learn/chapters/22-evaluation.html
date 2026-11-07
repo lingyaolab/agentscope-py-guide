@@ -161,7 +161,8 @@ from pydantic import BaseModel
 from agentscope.credential import CredentialBase
 from agentscope.formatter import OpenAIChatFormatter
 from agentscope.message import Msg
-from agentscope.model import ChatModelBase, ChatResponse, ToolChoice
+from agentscope.model import ChatModelBase, ChatResponse
+from agentscope.tool import ToolChoice
 
 
 class ScriptedCredential(CredentialBase):
@@ -403,7 +404,7 @@ def behavior_signature(events) -&gt; dict:
             if isinstance(e, ToolResultEndEvent)
         ],
         "finished": [
-            e.finished_reason.value
+            e.finished_reason
             for e in events
             if isinstance(e, ReplyEndEvent)
         ],

@@ -240,7 +240,7 @@ app = create_app(
         <p>
           会话 ID 不是存出来的，而是用 <code>(channel_id, agent_id, scope_key)</code> 做 uuid5
           <strong>确定性推导</strong>。所以每个节点算出的结果一致，创建会话可以幂等
-          <span class="src" data-src="src/agentscope/app/channel/_routing.py:1">_routing.py:1</span>。
+          <span class="src" data-src="src/agentscope/app/channel/_routing.py:69">_routing.py:69</span>。
         </p>
         <div class="callout warn">
           <span class="ct">路由配置的三条硬校验</span>
@@ -273,7 +273,7 @@ app = create_app(
           </table>
         </div>
         <p>
-          飞书侧支持流式卡片、工具确认卡片、表情反馈与知识库工具（<code>ListWikiSpaces</code> 等）。
+          飞书侧支持流式卡片、工具确认卡片与表情反馈；知识库工具（<code>ListWikiSpaces</code> 等）只在钉钉渠道提供。
           创建机器人、开权限、配事件订阅的步骤以官方接入页为准。
         </p>
 
@@ -414,14 +414,15 @@ class MyChannel(ChannelBase):
           </table>
         </div>
         <p>
-          分布式部署时，每个节点可以各自维持长连接；同一条消息可能被多个节点收到，
-          但同一个会话在同一时刻只允许一个节点收集并发送回复，所以用户不会看到重复回答。
-          前提是 <code>storage</code> 与 <code>message_bus</code> 都指向共享 Redis。
+          不要每个节点都维持长连接：平台通常只应有一条机器人连接。推荐独立 channel worker，
+          API 副本设 <code>enable_channel_worker=False</code>。共享 <code>storage</code>
+          （Redis 或 SQL）与分布式 <code>message_bus</code> 可以让会话锁协调回复，
+          但平台重复投递仍需自己做幂等，不能假设绝不会重复。
         </p>
 
         <h2 id="security">安全与权限</h2>
         <ul>
-          <li>凭据加密保存，<code>GET /channels/{id}</code> 返回脱敏结果</li>
+          <li>渠道凭据在记录里是明文，只有 API 边界做脱敏；静态加密是尚未实现的 hook，需由存储层补</li>
           <li>工具审批仍然走 08 章的权限系统，渠道只是把确认 UI 放在 IM 里</li>
           <li>确认结果只带定位键，不信任卡片回传的内容</li>
           <li>IM 消息同样可能包含提示注入，权限规则与工具检查不能省</li>

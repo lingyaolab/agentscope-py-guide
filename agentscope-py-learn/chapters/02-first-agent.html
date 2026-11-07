@@ -91,6 +91,7 @@ from agentscope.agent import Agent
 from agentscope.credential import DeepSeekCredential
 from agentscope.message import UserMsg
 from agentscope.model import DeepSeekChatModel
+from agentscope.permission import PermissionBehavior, PermissionDecision
 from agentscope.tool import FunctionTool, Toolkit
 
 
@@ -115,7 +116,18 @@ async def main() -&gt; None:
             ),
             model="deepseek-v4-flash",
         ),
-        toolkit=Toolkit(tools=[FunctionTool(get_weather, is_read_only=True)]),
+        toolkit=Toolkit(
+            tools=[
+                FunctionTool(
+                    get_weather,
+                    is_read_only=True,
+                    permission=PermissionDecision(
+                        behavior=PermissionBehavior.ALLOW,
+                        decision_reason="只读天气查询",
+                    ),
+                ),
+            ],
+        ),
     )
 
     msg = await agent.reply(
@@ -408,9 +420,13 @@ agent = Agent(
           因为状态还在 <code>self.state</code> 里；但换一个实例就什么都不记得，除非你把旧实例的
           <code>state</code> 传过去。
         </p>
-        <pre><code>await agent.reply(UserMsg(name="user", content="我叫小明。"))
-msg = await agent.reply(UserMsg(name="user", content="我叫什么？"))
-print(msg.get_text_content())  # 会回答「小明」</code></pre>
+        <pre><code>from agentscope.message import UserMsg
+
+
+async def ask_twice(agent):
+    await agent.reply(UserMsg(name="user", content="我叫小明。"))
+    msg = await agent.reply(UserMsg(name="user", content="我叫什么？"))
+    print(msg.get_text_content())  # 会回答「小明」</code></pre>
         <p>
           只想让 Agent「看到」一条消息、但不触发回复，用 <code>observe()</code>
           <span class="src" data-src="src/agentscope/agent/_agent.py:382">_agent.py:382</span>。
@@ -431,20 +447,22 @@ print(msg.get_text_content())  # 会回答「小明」</code></pre>
           <span class="src" data-src="src/agentscope/agent/_agent.py:289">_agent.py:289</span>。
         </p>
         <pre><code>from agentscope.event import EventType
-from agentscope.message import Msg
+from agentscope.message import Msg, UserMsg
 
-async for chunk in agent.reply_stream(
-    UserMsg(name="user", content="杭州今天天气怎么样？"),
-    yield_final_msg=True,
-):
-    if isinstance(chunk, Msg):
-        print("\n[final]", chunk.get_text_content())
-        continue
 
-    if chunk.type == EventType.TEXT_BLOCK_DELTA:
-        print(chunk.delta, end="", flush=True)
-    elif chunk.type == EventType.TOOL_CALL_START:
-        print(f"\n[tool] {chunk.tool_call_name}")</code></pre>
+async def print_stream(agent):
+    async for chunk in agent.reply_stream(
+        UserMsg(name="user", content="杭州今天天气怎么样？"),
+        yield_final_msg=True,
+    ):
+        if isinstance(chunk, Msg):
+            print("\n[final]", chunk.get_text_content())
+            continue
+
+        if chunk.type == EventType.TEXT_BLOCK_DELTA:
+            print(chunk.delta, end="", flush=True)
+        elif chunk.type == EventType.TOOL_CALL_START:
+            print(f"\n[tool] {chunk.tool_call_name}")</code></pre>
         <p>一次「工具 + 回答」的事件顺序大致是：</p>
         <pre><code>REPLY_START
   MODEL_CALL_START
@@ -486,8 +504,8 @@ REPLY_END</code></pre>
             <tbody>
               <tr>
                 <td>包装一个函数工具</td>
-                <td><code>FunctionTool(func, is_read_only=True)</code></td>
-                <td>默认 <code>is_read_only=False</code>，会走 ASK</td>
+                <td><code>FunctionTool(func, permission=ALLOW)</code></td>
+                <td><code>is_read_only</code> 只是标记；未传 <code>permission</code> 默认 ASK</td>
               </tr>
               <tr>
                 <td>注册工具</td>
@@ -537,8 +555,9 @@ REPLY_END</code></pre>
           <p>
             大概率是工具权限走了 ASK：框架产出了 <code>REQUIRE_USER_CONFIRM</code> 事件并在等确认。
             <code>FunctionTool</code> 默认就是 ASK
-            <span class="src" data-src="src/agentscope/tool/_adapters.py:131">_adapters.py:131</span>。
-            只读工具加 <code>is_read_only=True</code>；需要执行副作用的工具，应该显式设计确认流程（08 章），
+            <span class="src" data-src="src/agentscope/tool/_adapters.py:134">_adapters.py:134</span>。
+            只读工具也要显式传 <code>permission=PermissionDecision(behavior=ALLOW, ...)</code>；
+            <code>is_read_only=True</code> 只是标记，不会自动放行。需要执行副作用的工具应保留确认流程（08 章），
             而不是简单改成 BYPASS。
           </p>
         </div>
