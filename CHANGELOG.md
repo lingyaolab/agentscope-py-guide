@@ -2,6 +2,20 @@
 
 站点版本与所讲解的框架版本分开记：框架版本固定在 **AgentScope Python 2.0.11**，站点版本见下。
 
+## v0.22.0 — 2026-11-07
+
+新增第 22 章「测试与评测」，用公开接口搭一套不烧钱的回归集。
+
+- **分层**：单元 / 回放 / 真实模型冒烟 / 裁判与人工，各自的触发时机与成本。
+- **假模型**：继承 `ChatModelBase` 实现 `_call_api`，必须设置 `formatter`，脚本耗尽即抛错。
+- **确定性断言**：`ToolCallStartEvent`、`ToolResultEndEvent.state`、`ReplyEndEvent.finished_reason`。
+- **黄金样本**：只冻结工具名、状态、结束原因，用 `AnyString` / `AnyValue` 处理不稳定字段。
+- **工具指标**：选择准确率、参数正确率、执行成功率、任务完成率与额外调用数。
+- **检索指标**：`KnowledgeBase.search` 的 `VectorSearchResult`、recall@k、MRR、引用命中。
+- **LLM 裁判**：位置 / 长度偏差、同源裁判、抖动与缓存。
+- **CI**：PR 只跑 unit + replay，真实调用放夜间或发布前，fork PR 不给密钥。
+- **成本**：样本数 × 轮次 × token，`ReActConfig.max_iters`、预算与裁判缓存。
+
 ## v0.21.0 — 2026-11-07
 
 新增第 21 章「可观测性」，把追踪、token 与成本串成一条线。

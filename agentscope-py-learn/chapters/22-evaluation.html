@@ -1,0 +1,842 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="AgentScope Python 2.0.11 测试与评测：ScriptedChatModel 假模型、事件流确定性断言、黄金回归集、工具与检索指标、LLM 裁判、CI 分层门禁与评测成本控制。"
+    />
+    <meta property="og:type" content="article" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta property="og:site_name" content="AgentScope Python 2.0.11 学习站" />
+    <meta property="og:title" content="22 测试与评测：不烧钱的回归集 · AgentScope Python 2.0.11 学习站" />
+    <meta property="og:description" content="假模型替身、事件流断言、黄金回归集、工具与检索指标、LLM 裁判、CI 分层与成本控制。" />
+    <title>22 测试与评测：不烧钱的回归集 · AgentScope Python 2.0.11 学习站</title>
+    <script>
+      try {
+        var t = localStorage.getItem("asp-learn-theme");
+        if (!t) t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    </script>
+    <link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+    <link rel="stylesheet" href="../assets/base.css" />
+    <link rel="stylesheet" href="../assets/diagrams.css" />
+  </head>
+  <body data-page="22-evaluation" data-root="..">
+    <main>
+      <article class="article">
+        <h1>22 · 测试与评测</h1>
+        <p class="lede">
+          改一句 prompt、换一个模型、调一次 temperature，Agent 的行为就可能变。
+          靠人工聊几句判断好坏，既不可重复，也不便宜。
+          这一章用 AgentScope 的公开接口搭一套<strong>分层回归集</strong>：
+          大部分测试不花钱，只有少量真实调用留给夜间任务。
+        </p>
+
+        <h2 id="goals">读完你能做到</h2>
+        <ul class="goals">
+          <li>写一个不访问网络的 <code>ScriptedChatModel</code>，按脚本返回模型响应</li>
+          <li>从事件流里断言工具选择、工具结果与最终回答</li>
+          <li>把一次运行固化成只包含稳定字段的黄金样本</li>
+          <li>计算工具选择 / 成功率与检索的 recall@k、MRR</li>
+          <li>设计一套按 PR、夜间、发布分层的 CI 门禁</li>
+        </ul>
+
+        <h2 id="why">先说为什么：评测不是「多跑几次」</h2>
+        <p>
+          「多跑几次看看」的问题不是不认真，而是<strong>不可比较</strong>：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>做法</th>
+                <th>能回答</th>
+                <th>不能回答</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>人工聊几句</td>
+                <td>「这次感觉还行」</td>
+                <td>上次是不是更好？哪一类输入退化了？</td>
+              </tr>
+              <tr>
+                <td>跑一遍真实模型</td>
+                <td>「这次输出是什么」</td>
+                <td>同样的输入明天还会不会这样？</td>
+              </tr>
+              <tr>
+                <td>只断言最终文本</td>
+                <td>「答案对不对」</td>
+                <td>工具选错但碰巧答对；答案对但多花了五轮</td>
+              </tr>
+              <tr>
+                <td>回归集 + 行为断言</td>
+                <td>固定输入下的工具、状态、回答是否稳定</td>
+                <td>开放世界的全部情况，仍然需要抽样与人工</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          一个可用的评测至少要有三样东西：<strong>固定输入</strong>、
+          <strong>可观察的行为</strong>、<strong>可比较的基线</strong>。
+          好消息是，AgentScope 的事件流与消息块已经把行为暴露得很完整，不需要自己去猜。
+        </p>
+        <div class="callout warn">
+          <span class="ct">AgentScope 2.0.11 没有内置 eval 模块</span>
+          <p>
+            这一章不是调用某个 <code>evaluate()</code> API，而是用公开的
+            <code>ChatModelBase</code>、<code>Agent</code> 与事件类型搭一套最小回归集。
+            上游自己的单元测试也是这么做的。
+          </p>
+        </div>
+
+        <h2 id="layers">测试金字塔：三层，三种花钱方式</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>层</th>
+                <th>模型</th>
+                <th>单次耗时</th>
+                <th>跑在什么时候</th>
+                <th>成本</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>L1 单元 / 契约</td>
+                <td>假模型</td>
+                <td>毫秒级</td>
+                <td>每个 PR、每次本地保存</td>
+                <td>0</td>
+              </tr>
+              <tr>
+                <td>L2 回放 / 黄金</td>
+                <td>固定响应或录制的消息</td>
+                <td>秒级</td>
+                <td>每个 PR</td>
+                <td>0</td>
+              </tr>
+              <tr>
+                <td>L3 真实模型冒烟</td>
+                <td>真实 provider</td>
+                <td>分钟级</td>
+                <td>夜间、发布前</td>
+                <td>按 token 计费</td>
+              </tr>
+              <tr>
+                <td>L4 模型裁判 / 人工</td>
+                <td>强模型或标注员</td>
+                <td>分钟到小时</td>
+                <td>周级、重大改版</td>
+                <td>最贵</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          原则是：<strong>能用确定性断言的就不要调模型</strong>；
+          必须调模型的，控制样本量；必须用裁判的，只做趋势判断，不做单次硬门禁。
+        </p>
+
+        <h2 id="fake">假模型替身：ScriptedChatModel</h2>
+        <p>
+          假模型的关键不是「返回一段假文本」，而是<strong>控制每次调用的返回值</strong>，
+          这样才能构造「先调工具、再回答」这类多轮场景。
+          AgentScope 的模型基类只要求实现 <code>_call_api</code>
+          <span class="src" data-src="src/agentscope/model/_base.py:303">_base.py:303</span>，
+          上游测试里的 <code>MockModel</code>
+          <span class="src" data-src="tests/utils.py:51">utils.py:51</span>
+          就是同一个思路。
+        </p>
+        <pre><code>from collections import deque
+
+from pydantic import BaseModel
+
+from agentscope.credential import CredentialBase
+from agentscope.formatter import OpenAIChatFormatter
+from agentscope.message import Msg
+from agentscope.model import ChatModelBase, ChatResponse, ToolChoice
+
+
+class ScriptedCredential(CredentialBase):
+    @classmethod
+    def get_chat_model_class(cls):
+        return ScriptedChatModel
+
+
+class ScriptedChatModel(ChatModelBase):
+    """按预设顺序返回响应，不访问网络。"""
+
+    class Parameters(BaseModel):
+        pass
+
+    def __init__(self, responses: list[ChatResponse]) -&gt; None:
+        super().__init__(
+            credential=ScriptedCredential(),
+            model="scripted",
+            parameters=self.Parameters(),
+            stream=False,
+        )
+        self.formatter = OpenAIChatFormatter()
+        self._responses = deque(responses)
+
+    async def _call_api(
+        self,
+        model_name: str,
+        messages: list[Msg],
+        tools: list[dict] | None = None,
+        tool_choice: ToolChoice | None = None,
+        **kwargs,
+    ) -&gt; ChatResponse:
+        if not self._responses:
+            raise AssertionError("脚本已用完：被测代码多调了一次模型")
+        return self._responses.popleft()</code></pre>
+        <p>
+          <code>ChatResponse</code>
+          <span class="src" data-src="src/agentscope/model/_model_response.py:32">_model_response.py:32</span>
+          的最小必填字段只有 <code>content</code> 与 <code>is_last</code>；
+          <code>usage</code> 可选，但在评测成本时建议填上，方便统计。
+        </p>
+        <div class="callout warn">
+          <span class="ct">必须给假模型一个 formatter</span>
+          <p>
+            Agent 在处理输入时会读 <code>model.formatter.supported_input_media_types</code>
+            <span class="src" data-src="src/agentscope/agent/_agent.py:2063">_agent.py:2063</span>。
+            漏掉这一行，普通文本测试也可能在附件处理处直接报错。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">别直接 import 上游的 <code>tests.utils</code></span>
+          <p>
+            <code>MockModel</code> 在源码仓库的 <code>tests/</code> 里，不随安装包发布。
+            复制这个模式到自己项目的 <code>tests/</code>，比依赖内部路径稳。
+          </p>
+        </div>
+        <p>
+          需要流式时，不要返回单个 <code>ChatResponse</code>，而是返回一个异步生成器：
+          每个 chunk <code>is_last=False</code>，最后一个 <code>is_last=True</code> 且带完整内容与 usage。
+          <code>ChatModelBase.__call__</code>
+          <span class="src" data-src="src/agentscope/model/_base.py:184">_base.py:184</span>
+          会把它们累积成完整响应，并处理中断与重试。
+        </p>
+
+        <h2 id="assert">确定性断言：从事件流看行为</h2>
+        <p>
+          <code>agent.reply()</code> 只给你最终消息，过程信息在
+          <code>agent.reply_stream()</code> 的事件里。测试最关心三类事件：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>事件</th>
+                <th>能断言什么</th>
+                <th>源码</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>ToolCallStartEvent</code></td>
+                <td>工具名、调用 id</td>
+                <td><span class="src" data-src="src/agentscope/event/_event.py:313">_event.py:313</span></td>
+              </tr>
+              <tr>
+                <td><code>ToolResultEndEvent</code></td>
+                <td>工具结果状态：成功 / 失败 / 中断 / 拒绝</td>
+                <td><span class="src" data-src="src/agentscope/event/_event.py:408">_event.py:408</span></td>
+              </tr>
+              <tr>
+                <td><code>ReplyEndEvent</code></td>
+                <td>结束原因：完成 / 中断 / 超过迭代 / 错误</td>
+                <td><span class="src" data-src="src/agentscope/event/_event.py:111">_event.py:111</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          下面这组测试让脚本模型先调一次天气工具，再给出最终回答：
+        </p>
+        <pre><code>import unittest
+
+from agentscope.agent import Agent
+from agentscope.event import ToolCallStartEvent, ToolResultEndEvent
+from agentscope.message import (
+    Msg,
+    TextBlock,
+    ToolCallBlock,
+    UserMsg,
+)
+from agentscope.model import ChatResponse, ChatUsage
+from agentscope.permission import PermissionBehavior, PermissionDecision
+from agentscope.tool import FunctionTool, Toolkit
+
+
+def get_weather(city: str) -&gt; str:
+    """查询城市天气。"""
+    return f"{city}：晴，24°C"
+
+
+def make_toolkit() -&gt; Toolkit:
+    allow = PermissionDecision(
+        behavior=PermissionBehavior.ALLOW,
+        decision_reason="测试环境",
+        message="allowed",
+    )
+    return Toolkit(
+        tools=[FunctionTool(get_weather, permission=allow)],
+    )
+
+
+class WeatherAgentTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -&gt; None:
+        self.model = ScriptedChatModel(
+            [
+                ChatResponse(
+                    content=[
+                        ToolCallBlock(
+                            id="call-1",
+                            name="get_weather",
+                            input='{"city": "Hangzhou"}',
+                        ),
+                    ],
+                    is_last=True,
+                ),
+                ChatResponse(
+                    content=[TextBlock(text="杭州晴，24°C。")],
+                    is_last=True,
+                    usage=ChatUsage(
+                        input_tokens=32,
+                        output_tokens=9,
+                        time=0.01,
+                    ),
+                ),
+            ],
+        )
+        self.agent = Agent(
+            name="weather",
+            system_prompt="你是一个天气助手。",
+            model=self.model,
+            toolkit=make_toolkit(),
+        )
+
+    async def test_tool_then_answer(self) -&gt; None:
+        events = []
+        final: Msg | None = None
+        async for event in self.agent.reply_stream(
+            UserMsg(name="user", content="杭州天气怎么样？"),
+            yield_final_msg=True,
+        ):
+            events.append(event)
+            if isinstance(event, Msg):
+                final = event
+
+        calls = [
+            e.tool_call_name
+            for e in events
+            if isinstance(e, ToolCallStartEvent)
+        ]
+        states = [
+            e.state
+            for e in events
+            if isinstance(e, ToolResultEndEvent)
+        ]
+
+        self.assertEqual(calls, ["get_weather"])
+        self.assertEqual(states, ["success"])
+        self.assertEqual(final.get_text_content(), "杭州晴，24°C。")</code></pre>
+        <p>
+          <code>ToolResultEndEvent.state</code>
+          <span class="src" data-src="src/agentscope/event/_event.py:419">_event.py:419</span>
+          的取值来自
+          <code>ToolResultState</code>
+          <span class="src" data-src="src/agentscope/message/_block.py:185">_block.py:185</span>：
+          <code>success</code> / <code>error</code> / <code>interrupted</code> /
+          <code>denied</code> / <code>running</code>。
+          断言它比断言一段自由文本稳定得多。
+        </p>
+        <p>
+          <code>yield_final_msg=True</code> 会让流在最后额外产出一条最终
+          <code>Msg</code>；不传则只拿事件。最终文本用
+          <code>get_text_content()</code>
+          <span class="src" data-src="src/agentscope/message/_base.py:155">_base.py:155</span>
+          取，别自己拼。
+        </p>
+        <div class="callout tip">
+          <span class="ct">先断言行为，再断言文本</span>
+          <p>
+            工具名、状态、结束原因、轮次是稳定的；自然语言措辞不是。
+            行为断言失败时，定位也比 diff 一大段文本快。
+          </p>
+        </div>
+
+        <h2 id="golden">金样本：只冻结稳定的部分</h2>
+        <p>
+          「黄金文件」不是把整个事件流 <code>model_dump()</code> 存下来——
+          id、时间戳、token 数每次都会变。只冻结你真正关心的行为签名：
+        </p>
+        <pre><code>import json
+from pathlib import Path
+
+from agentscope.event import (
+    ReplyEndEvent,
+    ToolCallStartEvent,
+    ToolResultEndEvent,
+)
+
+
+def behavior_signature(events) -&gt; dict:
+    return {
+        "tools": [
+            e.tool_call_name
+            for e in events
+            if isinstance(e, ToolCallStartEvent)
+        ],
+        "states": [
+            e.state
+            for e in events
+            if isinstance(e, ToolResultEndEvent)
+        ],
+        "finished": [
+            e.finished_reason.value
+            for e in events
+            if isinstance(e, ReplyEndEvent)
+        ],
+    }
+
+
+def assert_matches_golden(events, path: str) -&gt; None:
+    expected = json.loads(Path(path).read_text(encoding="utf-8"))
+    actual = behavior_signature(events)
+    assert actual == expected, (
+        f"行为与黄金样本不一致\n期望: {expected}\n实际: {actual}"
+    )</code></pre>
+        <p>
+          对应的 <code>tests/golden/weather.json</code>：
+        </p>
+        <pre><code>{
+  "tools": ["get_weather"],
+  "states": ["success"],
+  "finished": ["completed"]
+}</code></pre>
+        <p>
+          如果某些字段天生不稳定（比如耗时、模型返回的 id），上游测试用
+          <code>AnyString</code>
+          <span class="src" data-src="tests/utils.py:16">utils.py:16</span> 与
+          <code>AnyValue</code>
+          <span class="src" data-src="tests/utils.py:28">utils.py:28</span>
+          做「匹配任意值」的占位。你也可以在自己的断言里用同样的技巧。
+        </p>
+        <ul>
+          <li>一个场景一个文件，命名对应输入，不要把所有场景塞进一个大 JSON</li>
+          <li>黄金文件要进版本库，更新时必须能看到 diff 并有人 review</li>
+          <li>不要把整段自然语言回答冻结成唯一正确解；用关键片段、结构或裁判分</li>
+          <li>黄金文件是回归网，不是正确性证明：它只保证「没有意外变化」</li>
+        </ul>
+
+        <h2 id="tools">工具指标：选对、传对、跑成功</h2>
+        <p>
+          工具场景至少要分三层看，否则「答对了」会掩盖很多问题：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>指标</th>
+                <th>定义</th>
+                <th>失败意味着</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>选择准确率</td>
+                <td>期望工具名出现在实际调用里的比例</td>
+                <td>提示词、工具描述或路由有问题</td>
+              </tr>
+              <tr>
+                <td>参数正确率</td>
+                <td>入参 JSON 与期望字段 / 值一致的比例</td>
+                <td>schema 描述不清，模型在猜</td>
+              </tr>
+              <tr>
+                <td>执行成功率</td>
+                <td><code>ToolResultEndEvent.state == "success"</code> 的比例</td>
+                <td>工具实现、权限或外部依赖有问题</td>
+              </tr>
+              <tr>
+                <td>任务完成率</td>
+                <td><code>ReplyEndEvent.finished_reason == "completed"</code> 且回答通过检查</td>
+                <td>多轮规划或收尾有问题</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <pre><code>from agentscope.event import ToolCallStartEvent, ToolResultEndEvent
+
+
+def tool_metrics(expected_calls: list[str], events) -&gt; dict:
+    calls = [
+        e.tool_call_name
+        for e in events
+        if isinstance(e, ToolCallStartEvent)
+    ]
+    states = [
+        e.state
+        for e in events
+        if isinstance(e, ToolResultEndEvent)
+    ]
+
+    expected = set(expected_calls)
+    selected = expected &amp; set(calls)
+
+    return {
+        "selection": len(selected) / len(expected) if expected else 1.0,
+        "success": (
+            states.count("success") / len(states) if states else 0.0
+        ),
+        "extra_calls": len(set(calls) - expected),
+    }</code></pre>
+        <p>
+          <code>extra_calls</code> 很值得单独看：模型多调了一个无关工具，
+          最终答案可能仍然正确，但延迟和成本已经变差。
+        </p>
+
+        <h2 id="rag">检索指标：recall@k 与 MRR</h2>
+        <p>
+          RAG 的回归要先单独测检索，再测生成。检索侧不需要模型参与，
+          只要你有「问题 → 应命中的文档 id」标注。
+          <code>KnowledgeBase.search()</code>
+          <span class="src" data-src="src/agentscope/rag/_knowledge.py:197">_knowledge.py:197</span>
+          返回按分数降序、已去重的
+          <code>VectorSearchResult</code>
+          <span class="src" data-src="src/agentscope/rag/_vdb/_vector_store.py:53">_vector_store.py:53</span>，
+          每条带 <code>document_id</code>、<code>score</code> 与 <code>chunk</code>。
+        </p>
+        <pre><code>def recall_at_k(expected_ids: list[str], results, k: int) -&gt; float:
+    top = {r.document_id for r in results[:k]}
+    expected = set(expected_ids)
+    return len(top &amp; expected) / len(expected) if expected else 1.0
+
+
+def reciprocal_rank(expected_ids: list[str], results) -&gt; float:
+    expected = set(expected_ids)
+    for rank, result in enumerate(results, start=1):
+        if result.document_id in expected:
+            return 1.0 / rank
+    return 0.0</code></pre>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>指标</th>
+                <th>回答的问题</th>
+                <th>适合场景</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>recall@k</td>
+                <td>前 k 条里找回了多少应命中文档</td>
+                <td>「资料有没有被找到」</td>
+              </tr>
+              <tr>
+                <td>MRR</td>
+                <td>第一条正确结果排得多靠前</td>
+                <td>「用户能不能一眼看到」</td>
+              </tr>
+              <tr>
+                <td>引用命中</td>
+                <td>最终回答引用的文档是否在标注集合里</td>
+                <td>「生成有没有用对资料」</td>
+              </tr>
+              <tr>
+                <td>忠实度</td>
+                <td>回答是否只依据检索内容</td>
+                <td>通常需要裁判或人工</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct">不同向量库的分数不可直接比较</span>
+          <p>
+            <code>VectorSearchResult.score</code> 在同一后端内可排序，
+            不同距离度量之间没有统一尺度。跨库比较请用 recall@k / MRR 这类基于排名的指标。
+          </p>
+        </div>
+        <p>
+          生成侧再测：回答里是否包含应引用的事实、是否出现知识库之外的编造。
+          前者可以字符串 / 正则断言，后者才需要裁判。
+        </p>
+
+        <h2 id="judge">模型当裁判：能用，但要防抖</h2>
+        <p>
+          开放式回答没有唯一解，常用 LLM-as-judge。它适合做<strong>趋势</strong>，
+          不适合做每次 PR 的硬门禁。至少要控制这几件事：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>风险</th>
+                <th>做法</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>位置偏差（偏好第一个答案）</td>
+                <td>成对比较时随机交换 A/B 顺序，或两边各判一次取平均</td>
+              </tr>
+              <tr>
+                <td>长度偏差（偏好更长答案）</td>
+                <td>评分标准里明确「简洁不扣分」，必要时控制长度</td>
+              </tr>
+              <tr>
+                <td>裁判与被测模型同源</td>
+                <td>尽量用不同家族的模型；记录裁判版本</td>
+              </tr>
+              <tr>
+                <td>结果抖动</td>
+                <td>temperature 设低、固定随机种子、同一批样本多次取多数</td>
+              </tr>
+              <tr>
+                <td>成本失控</td>
+                <td>缓存「样本 + 回答 + 裁判版本」的判定结果，只重判变化项</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          裁判输出应该是一个带理由的结构化结果（分数 + 命中的评分项），
+          而不是一句「好 / 不好」。理由让失败样本可复盘，结构化让统计可聚合。
+        </p>
+
+        <h2 id="ci">CI 门禁：分层跑、按需花钱</h2>
+        <p>
+          上游仓库自己就是用 pytest + coverage 跑单元测试，并在三个操作系统上做矩阵
+          <span class="src" data-src=".github/workflows/unittest.yml:1">unittest.yml:1</span>；
+          <code>pytest</code> 在 dev 依赖里
+          <span class="src" data-src="pyproject.toml:203">pyproject.toml:203</span>。
+          自己的 Agent 项目可以更简单：
+        </p>
+        <pre><code>name: agent-regression
+
+on: [pull_request]
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/unit tests/replay -q</code></pre>
+        <p>
+          分层策略：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>任务</th>
+                <th>触发</th>
+                <th>跑什么</th>
+                <th>密钥</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>PR 门禁</td>
+                <td>每次 push</td>
+                <td><code>tests/unit</code> + <code>tests/replay</code></td>
+                <td>不需要</td>
+              </tr>
+              <tr>
+                <td>夜间冒烟</td>
+                <td>定时</td>
+                <td>20–50 条真实模型样本</td>
+                <td>仓库 secret</td>
+              </tr>
+              <tr>
+                <td>发布前</td>
+                <td>打 tag / 手动</td>
+                <td>完整回归集 + 关键 RAG 集</td>
+                <td>受控环境</td>
+              </tr>
+              <tr>
+                <td>周级评测</td>
+                <td>每周</td>
+                <td>LLM 裁判 + 人工抽查</td>
+                <td>受控环境</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn">
+          <span class="ct">PR 不要拿仓库密钥跑真实模型</span>
+          <p>
+            来自 fork 的 PR 默认拿不到 secret。即便能拿到，也不该让未审代码消耗你的额度。
+            真实调用放在受信任的分支或定时任务里。
+          </p>
+        </div>
+
+        <h2 id="cost">成本控制：把评测预算花在刀刃上</h2>
+        <p>
+          评测成本 ≈ 样本数 × 每样本轮次 × 单轮 token。三个因子都能压：
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>手段</th>
+                <th>效果</th>
+                <th>代价</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>假模型覆盖主流程</td>
+                <td>把绝大多数回归压到 0 成本</td>
+                <td>测不到模型能力本身</td>
+              </tr>
+              <tr>
+                <td>按失败聚类抽样</td>
+                <td>少量样本覆盖多数退化</td>
+                <td>需要先有一轮全量结果做聚类</td>
+              </tr>
+              <tr>
+                <td>限制 <code>max_iters</code><span class="src" data-src="src/agentscope/agent/_config.py:365">_config.py:365</span></td>
+                <td>防止单样本无限调工具</td>
+                <td>可能截断需要长链路的样本</td>
+              </tr>
+              <tr>
+                <td>预算中间件 / 成本中间件</td>
+                <td>单样本超支立刻停</td>
+                <td>需要接第 21 章的 token 统计</td>
+              </tr>
+              <tr>
+                <td>缓存裁判结果</td>
+                <td>只重判变化项</td>
+                <td>缓存键要包含裁判版本与提示词哈希</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          每次评测结束都应该产出两份东西：<strong>通过率</strong>与
+          <strong>花费</strong>。只看通过率，很容易用十倍成本换一个百分点；
+          只看花费，又会把该跑的样本砍掉。
+        </p>
+
+        <h2 id="cheatsheet">速查表</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>你想做</th>
+                <th>写什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>假模型</td><td>继承 <code>ChatModelBase</code>，实现 <code>_call_api</code>，设置 <code>formatter</code></td></tr>
+              <tr><td>构造多轮</td><td>按顺序塞 <code>ChatResponse</code>，用完即抛错</td></tr>
+              <tr><td>看工具调用</td><td><code>ToolCallStartEvent.tool_call_name</code></td></tr>
+              <tr><td>看工具结果</td><td><code>ToolResultEndEvent.state</code></td></tr>
+              <tr><td>看结束原因</td><td><code>ReplyEndEvent.finished_reason</code></td></tr>
+              <tr><td>拿最终消息</td><td><code>reply_stream(..., yield_final_msg=True)</code></td></tr>
+              <tr><td>黄金样本</td><td>只序列化工具名、状态、结束原因</td></tr>
+              <tr><td>检索指标</td><td>recall@k、MRR，基于排名而非分数</td></tr>
+              <tr><td>PR 门禁</td><td>只跑 unit + replay，不碰真实模型</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2 id="pitfalls">陷阱与窍门</h2>
+        <div class="callout warn">
+          <span class="ct">把整段回答做成唯一黄金答案</span>
+          <p>
+            换个同义句就红，团队很快就会开始无脑更新快照。
+            开放式回答用关键事实、结构或裁判分，不要逐字比。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">假模型忘了 <code>formatter</code></span>
+          <p>
+            Agent 会读 <code>supported_input_media_types</code>，缺了就直接
+            <code>AttributeError</code>。假模型也要像真模型一样装配 formatter。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">脚本用完返回兜底文本</span>
+          <p>
+            多调一次模型被静默吞掉，测试会误报通过。脚本耗尽时应该直接抛错，
+            让「意外的额外调用」变成失败。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">只测快乐路径</span>
+          <p>
+            工具被拒绝、参数校验失败、模型超时、达到最大迭代，都是行为的一部分。
+            用脚本模型和固定事件同样能覆盖，不需要真实故障。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">把裁判当唯一门禁</span>
+          <p>
+            裁判本身有方差，模型升级还会漂移。它适合趋势与抽样，
+            不适合「差 0.1 分就阻塞合并」。
+          </p>
+        </div>
+        <div class="callout warn">
+          <span class="ct">检索只测 top1</span>
+          <p>
+            生成模型可能拿到第 3 条也能答对。只看 top1 会低估检索，
+            也看不到排序退化。至少同时看 recall@k 与 MRR。
+          </p>
+        </div>
+        <div class="callout tip">
+          <span class="ct">把线上失败样本带回回归集</span>
+          <p>
+            第 21 章的 span 里有完整输入输出。挑出失败案例，脱敏后写成固定脚本响应，
+            回归集会越用越值钱。
+          </p>
+        </div>
+
+        <h2 id="quiz">自检三问</h2>
+        <ol>
+          <li>为什么假模型必须设置 <code>formatter</code>？不设置会在哪里炸？</li>
+          <li>黄金样本里哪些字段应该冻结，哪些不应该？</li>
+          <li>PR 门禁、夜间冒烟、周级裁判分别该跑什么？为什么不能合并成一个任务？</li>
+        </ol>
+
+        <h2 id="exercise">30 分钟动手练习</h2>
+        <ol>
+          <li>把本章的 <code>ScriptedChatModel</code> 跑通，确认测试不访问网络。</li>
+          <li>再加一个用例：模型调用了不存在的工具，断言 <code>ToolResultEndEvent.state == "error"</code>。</li>
+          <li>把 <code>behavior_signature</code> 写入 JSON，故意改坏工具名，确认测试报错信息能定位。</li>
+          <li>给一个小知识库标 5 个问题，计算 recall@3 与 MRR。</li>
+          <li>把 CI 分成 <code>unit</code> 与 <code>live</code> 两个 job，确认 PR 只跑前者。</li>
+        </ol>
+
+        <h2 id="next">下一步</h2>
+        <p>
+          有了回归集，才敢改 prompt、换模型、上生产。下一章
+          <strong>23 生产化：超时、重试、限流与部署</strong>
+          讲真实流量下的失败模式与防护。想先复习中间件顺序，可以回
+          <a href="07-middleware.html">07 中间件</a>。
+        </p>
+      </article>
+    </main>
+
+    <script src="../assets/nav.js"></script>
+    <script src="../assets/mini-highlight.js"></script>
+    <script src="../assets/site.js"></script>
+  </body>
+</html>
